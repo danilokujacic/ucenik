@@ -1,0 +1,42 @@
+[project]
+name = "ucenik"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Danilo Kujacic", email = "danilo.kujacic01@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "aioboto3>=15.5.0",
+    "bcrypt>=5.0.0",
+    "beanie>=2.1.0",
+    "chonkie>=1.7.0",
+    "chromadb>=1.5.9",
+    "fastapi[standard]>=0.141.1",
+    "pydantic-settings>=2.14.2",
+    "pyjwt>=2.13.0",
+    "pypdf>=6.14.2",
+    "rank-bm25>=0.2.2",
+    "redis>=8.1.0",
+    "sentence-transformers>=5.6.1",
+]
+
+[project.scripts]
+ucenik = "ucenik:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
