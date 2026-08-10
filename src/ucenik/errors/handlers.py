@@ -12,11 +12,15 @@ from fastapi.responses import JSONResponse
 
 from ucenik.errors.service import (
     DuplicateResourceError,
+    ExternalServiceUnavailableError,
     InvalidCredentialsError,
+    InvalidStateError,
     InvalidTokenError,
     NotFoundError,
     PayloadTooLargeError,
     PermissionDeniedError,
+    QuotaExceededError,
+    RateLimitExceededError,
     ServiceError,
     TokenExpiredError,
     UnsupportedMediaTypeError,
@@ -31,8 +35,12 @@ _STATUS_BY_ERROR: dict[type[ServiceError], int] = {
     PermissionDeniedError: 403,
     NotFoundError: 404,
     DuplicateResourceError: 409,
+    InvalidStateError: 409,
     PayloadTooLargeError: 413,
     UnsupportedMediaTypeError: 415,
+    QuotaExceededError: 429,
+    RateLimitExceededError: 429,
+    ExternalServiceUnavailableError: 503,
 }
 
 
@@ -46,7 +54,14 @@ def _status_for(exc: ServiceError) -> int:
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(ServiceError)
     async def handle_service_error(request: Request, exc: ServiceError) -> JSONResponse:
-        return JSONResponse(status_code=_status_for(exc), content={"detail": str(exc)})
+        headers = {}
+        # QuotaExceededError/RateLimitExceededError carry this; nothing
+        # else does (getattr avoids an isinstance chain just to read one
+        # optional field two error types happen to share).
+        retry_after = getattr(exc, "retry_after_seconds", None)
+        if retry_after is not None:
+            headers["Retry-After"] = str(max(0, int(retry_after)))
+        return JSONResponse(status_code=_status_for(exc), content={"detail": str(exc)}, headers=headers)
 
     @app.exception_handler(Exception)
     async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:

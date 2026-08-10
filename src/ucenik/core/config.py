@@ -2,20 +2,51 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    # extra="ignore": this app and the LLM proxy (llm_proxy/config.py's
+    # ProxySettings, which already sets the same thing) intentionally share
+    # one .env file - each only declares the fields it cares about. Without
+    # this, any non-empty proxy-only value (GROQ_API_KEY, and even
+    # .env.example's own non-empty GROQ_MODEL/GROQ_BASE_URL defaults) makes
+    # pydantic-settings' default extra="forbid" reject the whole file at
+    # import time - a real crash anyone copying .env.example to .env would
+    # hit immediately, found by actually loading Settings() against a real
+    # filled-in .env rather than assuming the template was safe.
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # "development" or "production" - gates Swagger/ReDoc (see main.py:
+    # roadmap §17, "protect/disable /docs"). Defaults to "production" (docs
+    # disabled) on purpose - fail closed, not open: an env someone forgot to
+    # set should hide docs, not expose them. Local dev sets this explicitly
+    # in .env (see .env.example).
+    environment: str = "production"
 
     jwt_secret: str
     jwt_access_token_expire_minutes: int = 10
     jwt_refresh_token_expire_days: int = 7
-    max_quota: int
+    max_quota: int  # LLM tokens per user per UTC day - see core/quota.py
     redis_url: str
 
     mongodb_url: str
     mongodb_db_name: str = "ucenik"
 
-    # TODO: placeholder values - the self-hosted proxy isn't built/running yet.
-    # Assumed OpenAI-compatible contract (POST {llm_proxy_url}/chat/completions,
-    # Bearer auth). Fill in real values once it exists; see llm/proxy_client.py.
+    # CORS - the origin(s) the browser frontend is served from. Comma-
+    # separated for multiple (e.g. local dev + a deployed preview URL).
+    # No CORS middleware without this - see core/config.py usage in main.py.
+    frontend_url: str = "http://localhost:3000"
+
+    @property
+    def cors_allowed_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.frontend_url.split(",") if origin.strip()]
+
+    @property
+    def docs_enabled(self) -> bool:
+        return self.environment != "production"
+
+    # The self-hosted LLM proxy - a real service now (src/ucenik/llm_proxy/,
+    # Groq-backed), not a placeholder. OpenAI-compatible contract (POST
+    # {llm_proxy_url}/chat/completions, Bearer auth) - see llm/proxy_client.py.
+    # llm_proxy_model is advisory only: the proxy always overrides it with
+    # its own configured model, never trusts what a caller sends.
     llm_proxy_url: str = "http://localhost:4000"
     llm_proxy_api_key: str = ""
     llm_proxy_model: str = "gpt-4o-mini"
@@ -49,6 +80,13 @@ class Settings(BaseSettings):
     # blurb that gets prepended before embedding.
     chunk_size: int = 400
     chunk_overlap: int = 50
+
+    # Rate limiting (core/rate_limit.py) - disabled in tests (see
+    # tests/conftest.py) since a global per-IP limit would otherwise trip
+    # against the test suite's own rapid-fire requests from one IP.
+    rate_limit_enabled: bool = True
+    rate_limit_requests_per_minute: int = 120
+    rate_limit_login_requests_per_minute: int = 10
 
 
 settings = Settings()

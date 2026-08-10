@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from beanie import Document, Indexed
 from pydantic import Field
@@ -15,7 +15,7 @@ class AuthSession(Document):
     user_id: Indexed(str)
     expires_at: Indexed(datetime, expireAfterSeconds=0)
     revoked: bool = False
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     class Settings:
         name = "auth_sessions"

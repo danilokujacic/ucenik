@@ -2,7 +2,6 @@ import redis.asyncio as redis
 
 from ucenik.core.config import settings
 
-
 redis_client: redis.Redis | None = None
 
 

@@ -1,0 +1,11 @@
+.venv
+.git
+.github
+.vscode
+__pycache__
+*.pyc
+.pytest_cache
+.env
+docs
+tests
+docker-compose*.yaml

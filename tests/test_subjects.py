@@ -1,5 +1,7 @@
+from unittest.mock import AsyncMock, patch
+
+from tests.conftest import auth_headers, fake_completion, login
 from ucenik.enum.user_role import UserRole
-from tests.conftest import auth_headers, login
 
 
 async def test_get_nonexistent_subject_is_404(client, make_user):
@@ -55,9 +57,7 @@ async def test_other_teacher_cannot_modify_subject(client, make_user):
     create = await client.post("/subjects", json={"name": "Math"}, headers=auth_headers(t1_tokens))
     subject_id = create.json()["id"]
 
-    response = await client.patch(
-        f"/subjects/{subject_id}", json={"name": "Hacked"}, headers=auth_headers(t2_tokens)
-    )
+    response = await client.patch(f"/subjects/{subject_id}", json={"name": "Hacked"}, headers=auth_headers(t2_tokens))
 
     assert response.status_code == 403
 
@@ -171,3 +171,54 @@ async def test_delete_subject_cascades_enrollments(client, make_user):
 
     remaining = await Enrollment.find(Enrollment.subject_id == subject_id).to_list()
     assert remaining == []
+
+
+async def test_delete_subject_cascades_documents_and_their_chunks(client, make_user):
+    """Deleting a subject must not orphan its Document rows, Chroma chunks,
+    or S3 object - see api/subjects.py's delete_subject.
+    """
+    import chromadb
+
+    from ucenik.core.storage import file_exists
+    from ucenik.models.documents import Document
+    from ucenik.rag.vector_store import _get_client as get_chroma_client
+
+    await make_user("teacher@x.com", UserRole.TEACHER)
+    tokens = await login(client, "teacher@x.com", "password123")
+
+    create = await client.post("/subjects", json={"name": "Biology"}, headers=auth_headers(tokens))
+    subject_id = create.json()["id"]
+
+    text = b"Mitosis is the process by which a single cell divides into two daughter cells."
+    with patch(
+        "ucenik.rag.contextualizer.complete",
+        AsyncMock(return_value=fake_completion("This chunk is from a biology chapter on mitosis.")),
+    ):
+        upload = await client.post(
+            f"/subjects/{subject_id}/documents",
+            files={"file": ("mitosis.txt", text, "text/plain")},
+            headers=auth_headers(tokens),
+        )
+        assert upload.status_code == 201
+        document_id = upload.json()["id"]
+
+        detail = await client.get(f"/subjects/{subject_id}/documents/{document_id}", headers=auth_headers(tokens))
+    assert detail.json()["status"] == "ready", detail.json()
+
+    document = await Document.get(document_id)
+    file_hash = document.file_hash
+    assert await file_exists(file_hash)
+
+    delete = await client.delete(f"/subjects/{subject_id}", headers=auth_headers(tokens))
+    assert delete.status_code == 204
+
+    assert await Document.get(document_id) is None
+    assert not await file_exists(file_hash)
+
+    chroma_client = await get_chroma_client()
+    try:
+        await chroma_client.get_collection(name=f"subject_{subject_id}")
+        collection_still_exists = True
+    except chromadb.errors.NotFoundError:
+        collection_still_exists = False
+    assert not collection_still_exists

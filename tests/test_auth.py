@@ -1,5 +1,5 @@
-from ucenik.enum.user_role import UserRole
 from tests.conftest import auth_headers, login
+from ucenik.enum.user_role import UserRole
 
 
 async def test_login_success(client, make_user):

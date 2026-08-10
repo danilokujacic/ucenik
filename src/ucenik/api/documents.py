@@ -1,29 +1,22 @@
-"""Document upload + management. Upload kicks off the ingest pipeline
-(rag/ingest.py) as a background task, not inline - see docs/rag-notes.md.
+"""Document upload + management - see services/documents.py for the actual
+upload/dedup/storage/ingest-dispatch logic; this file is just the FastAPI
+routing, request/response shapes, and BackgroundTasks wiring.
 """
 
-import hashlib
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, status
+from fastapi.responses import Response
 from pydantic import BaseModel
-from pymongo.errors import DuplicateKeyError as MongoDuplicateKeyError
 
 from ucenik.core.permissions import get_document, require_subject_access, require_subject_owner
 from ucenik.core.security import get_current_user
-from ucenik.core.storage import delete_file, file_exists, upload_file
-from ucenik.errors.persistence import translate_duplicate_key
-from ucenik.errors.service import DuplicateResourceError, PayloadTooLargeError, UnsupportedMediaTypeError
 from ucenik.models.documents import Document, DocumentStatus
 from ucenik.models.subjects import Subject
 from ucenik.models.users import User
-from ucenik.rag.ingest import ingest_document
-from ucenik.rag.vector_store import delete_document_chunks
+from ucenik.services import documents as documents_service
 
 router = APIRouter(prefix="/subjects/{subject_id}/documents", tags=["documents"])
-
-_ALLOWED_CONTENT_TYPES = {"text/plain", "application/pdf"}
-_MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB
 
 
 class DocumentPublic(BaseModel):
@@ -53,48 +46,22 @@ async def upload_document(
     subject: Annotated[Subject, Depends(require_subject_owner)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> DocumentPublic:
-    if file.content_type not in _ALLOWED_CONTENT_TYPES:
-        raise UnsupportedMediaTypeError(f"unsupported content type: {file.content_type}")
-
     data = await file.read()
-    if len(data) > _MAX_FILE_SIZE:
-        raise PayloadTooLargeError(f"file exceeds the {_MAX_FILE_SIZE} byte limit")
-
-    file_hash = hashlib.sha256(data).hexdigest()
-
-    # dedup: identical content already ingested (or in progress) for this
-    # subject - no-op, just hand back the existing record.
-    existing = await Document.find_one(Document.subject_id == str(subject.id), Document.file_hash == file_hash)
-    if existing is not None:
-        return _to_public(existing)
-
-    if not await file_exists(file_hash):
-        await upload_file(file_hash, data, content_type=file.content_type)
-
-    document = Document(
-        subject_id=str(subject.id),
-        filename=file.filename or "unnamed",
-        content_type=file.content_type,
-        file_hash=file_hash,
-        uploaded_by=str(user.id),
+    document, is_new = await documents_service.upload_document(
+        subject, str(user.id), file.filename, file.content_type, data
     )
-    try:
-        await document.insert()
-    except MongoDuplicateKeyError as exc:
-        # race: two concurrent uploads of the same file beat us to it
-        existing = await Document.find_one(Document.subject_id == str(subject.id), Document.file_hash == file_hash)
-        if existing is not None:
-            return _to_public(existing)
-        raise DuplicateResourceError("Document", file_hash) from translate_duplicate_key("Document", exc)
-
-    background_tasks.add_task(ingest_document, str(document.id))
-
+    if is_new:
+        # Module-qualified (not `from ... import ingest_document`) so
+        # patching ucenik.services.documents.ingest_document in tests
+        # actually takes effect - a bound-at-import-time name wouldn't see
+        # a patch applied after this module first loads.
+        background_tasks.add_task(documents_service.ingest_document, str(document.id))
     return _to_public(document)
 
 
 @router.get("", response_model=list[DocumentPublic])
 async def list_documents(subject: Annotated[Subject, Depends(require_subject_access)]) -> list[DocumentPublic]:
-    documents = await Document.find(Document.subject_id == str(subject.id)).to_list()
+    documents = await documents_service.list_documents(subject)
     return [_to_public(d) for d in documents]
 
 
@@ -106,17 +73,26 @@ async def get_document_details(
     return _to_public(document)
 
 
+@router.get("/{document_id}/download")
+async def download_document(
+    document: Annotated[Document, Depends(get_document)],
+    _subject: Annotated[Subject, Depends(require_subject_access)],
+) -> Response:
+    """Same access level as reading the document's metadata
+    (require_subject_access) - anyone who can see a document in the list
+    can also read its original file (docs/backlog.md item 10).
+    """
+    data = await documents_service.get_document_bytes(document)
+    return Response(
+        content=data,
+        media_type=document.content_type,
+        headers={"Content-Disposition": f'attachment; filename="{document.filename}"'},
+    )
+
+
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_document(
     document: Annotated[Document, Depends(get_document)],
     _subject: Annotated[Subject, Depends(require_subject_owner)],
 ) -> None:
-    await delete_document_chunks(document.subject_id, str(document.id))
-    file_hash = document.file_hash
-    await document.delete()
-
-    # only delete the S3 object if no other Document (any subject) still
-    # references this content hash - see core/storage.py
-    remaining = await Document.find_one(Document.file_hash == file_hash)
-    if remaining is None:
-        await delete_file(file_hash)
+    await documents_service.delete_document(document)

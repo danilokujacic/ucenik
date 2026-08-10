@@ -3,7 +3,6 @@ from pymongo import AsyncMongoClient
 
 from ucenik.core.config import settings
 
-
 mongodb_client: AsyncMongoClient | None = None
 
 

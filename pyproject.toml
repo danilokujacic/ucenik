@@ -11,19 +11,27 @@ dependencies = [
     "aioboto3>=15.5.0",
     "bcrypt>=5.0.0",
     "beanie>=2.1.0",
+    "celery[redis]>=5.4.0",
     "chonkie>=1.7.0",
     "chromadb>=1.5.9",
     "fastapi[standard]>=0.141.1",
+    "openpyxl>=3.1.5",
+    "pdf2image>=1.17.0",
     "pydantic-settings>=2.14.2",
     "pyjwt>=2.13.0",
     "pypdf>=6.14.2",
+    "pytesseract>=0.3.13",
+    "python-docx>=1.2.0",
+    "python-pptx>=1.0.2",
     "rank-bm25>=0.2.2",
-    "redis>=8.1.0",
+    "redis>=5.0.2,<6.5",
     "sentence-transformers>=5.6.1",
+    "torch>=2.0",
 ]
 
 [project.scripts]
 ucenik = "ucenik:main"
+ucenik-seed = "ucenik.seed:run"
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
@@ -33,6 +41,7 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.2",
 ]
 
 [tool.pytest.ini_options]
@@ -40,3 +49,41 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+extend-exclude = ["frontend"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes (unused imports/vars, undefined names, ...)
+    "I",    # isort (import sorting/grouping)
+    "B",    # flake8-bugbear (common bug-prone patterns)
+    "UP",   # pyupgrade (modern syntax for the pinned Python version)
+    "SIM",  # flake8-simplify
+    "C4",   # flake8-comprehensions
+    "ASYNC", # flake8-async (blocking calls in async def, etc. - relevant, this app is async end-to-end)
+]
+# B008: `Depends(...)` as a default arg is FastAPI's own documented pattern,
+# not the mutable-default-argument bug this rule normally catches.
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ucenik"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+# torch's default PyPI wheels bundle CUDA/GPU libraries (~900MB of
+# nvidia-* packages) even though this app only ever runs BGE-M3 on CPU here.
+# Pin it to PyTorch's own CPU-only wheel index instead.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

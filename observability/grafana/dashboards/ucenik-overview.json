@@ -1,0 +1,207 @@
+{
+  "title": "ucenik — overview",
+  "uid": "ucenik-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "tags": ["ucenik"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request rate",
+      "description": "Requests/sec, from the app's http.request access log (core/request_logging.py). One line per request, event label is indexed so this is a fast query.",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(rate({event=\"http.request\"}[$__interval]))",
+          "legendFormat": "requests/s"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Requests by status class",
+      "description": "2xx/4xx/5xx split of the same http.request stream - the fastest way to see error rate climbing.",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(rate({event=\"http.request\"} | json | status_code < 300 [$__interval]))",
+          "legendFormat": "2xx"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(rate({event=\"http.request\"} | json | status_code >= 400 | status_code < 500 [$__interval]))",
+          "legendFormat": "4xx"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(rate({event=\"http.request\"} | json | status_code >= 500 [$__interval]))",
+          "legendFormat": "5xx"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Request latency (p50 / p95)",
+      "description": "Unwraps duration_ms from http.request log lines - see core/request_logging.py.",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "quantile_over_time(0.50, {event=\"http.request\"} | json | unwrap duration_ms [$__interval]) by (event)",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "quantile_over_time(0.95, {event=\"http.request\"} | json | unwrap duration_ms [$__interval]) by (event)",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Requests by path",
+      "description": "Which endpoints are getting hit - helps spot a hot path or a client retry-looping against one route.",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum by (path) (rate({event=\"http.request\"} | json [$__interval]))",
+          "legendFormat": "{{path}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "LLM call success / failure rate",
+      "description": "From llm/proxy_client.py's llm.call event - covers both the ingest contextualizer and Tutor chat's real LLM calls (not the proxy relay itself, see panel below for that).",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(rate({event=\"llm.call\"} | json | success=\"true\" [$__interval]))",
+          "legendFormat": "success"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(rate({event=\"llm.call\"} | json | success=\"false\" [$__interval]))",
+          "legendFormat": "failure"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "LLM call latency (p95)",
+      "description": "How long the proxy round trip actually takes - streaming and non-streaming calls both log this on completion.",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "quantile_over_time(0.95, {event=\"llm.call\"} | json | unwrap duration_ms [$__interval]) by (event)",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "llm-proxy upstream errors",
+      "description": "From src/ucenik/llm_proxy/main.py - the proxy's own relay failures (Groq unreachable, or Groq returned non-2xx), distinct from the app-side llm.call failures above.",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum by (event) (rate({event=~\"llm_proxy.upstream_error|llm_proxy.upstream_non_2xx\"}[$__interval]))",
+          "legendFormat": "{{event}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Document ingest outcomes",
+      "description": "From rag/ingest.py - started vs completed vs failed. A widening gap between started and completed+failed means jobs are stuck, not just slow.",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 24, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum by (event) (rate({event=~\"ingest.started|ingest.completed|ingest.failed\"}[$__interval]))",
+          "legendFormat": "{{event}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Rate limit rejections",
+      "description": "From core/rate_limit.py - a sustained climb here means either real abuse or the limits are tuned too tight for real usage (see docs/backlog.md's tuning note).",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 32, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(rate({event=\"rate_limit.exceeded\"}[$__interval]))",
+          "legendFormat": "429s"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Log volume by level",
+      "description": "Overall health signal across all three services (app/worker/llm-proxy all feed the same structured pipeline, see core/logging_config.py) - a spike in ERROR with no matching spike in the panels above means something's failing outside the events already tracked by name.",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 32, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum by (level) (rate({level=~\"INFO|WARNING|ERROR\"}[$__interval]))",
+          "legendFormat": "{{level}}"
+        }
+      ]
+    }
+  ]
+}

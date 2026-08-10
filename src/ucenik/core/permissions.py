@@ -31,12 +31,21 @@ async def get_subject(subject_id: str) -> Subject:
     return subject
 
 
+def is_subject_owner(subject: Subject, user: User) -> bool:
+    """Plain sync predicate version of require_subject_owner's rule - pulled
+    out so non-HTTP-dependency call sites (api/ws.py's WebSocket handler,
+    which has no regular Depends() injection context to plug a FastAPI
+    dependency into) can reuse the exact same rule instead of re-deriving it.
+    """
+    return user.role == UserRole.ADMIN or subject.teacher_id == str(user.id)
+
+
 async def require_subject_owner(
     subject: Annotated[Subject, Depends(get_subject)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> Subject:
     """Only the teacher who owns this subject, or an admin, may pass."""
-    if user.role != UserRole.ADMIN and subject.teacher_id != str(user.id):
+    if not is_subject_owner(subject, user):
         raise PermissionDeniedError("only the owning teacher or an admin can do this")
     return subject
 

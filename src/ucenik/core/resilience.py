@@ -54,6 +54,20 @@ class CircuitBreaker:
         if self._failure_count >= self.failure_threshold:
             self._opened_at = time.monotonic()
 
+    @property
+    def is_open(self) -> bool:
+        """Public read-only check - lets a caller fail fast on its own terms
+        without going through .call(), for cases .call()'s single-awaitable
+        shape doesn't fit (e.g. rag/generator.py's streaming completion,
+        where a retry mid-stream would resend already-forwarded tokens)."""
+        return self._is_open
+
+    def record_success(self) -> None:
+        self._on_success()
+
+    def record_failure(self) -> None:
+        self._on_failure()
+
     async def call(self, fn: Callable[[], Awaitable[T]]) -> T:
         if self._is_open:
             raise CircuitOpenError("circuit breaker is open")

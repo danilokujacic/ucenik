@@ -1,5 +1,35 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:system",
     "python-envs.pythonProjects": [],
-    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python"
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    // Disabled: this defaults to "${workspaceFolder}/.env" and applies to
+    // every debug session regardless of launch.json - its parser doesn't
+    // strip inline "# comment" suffixes the way python-dotenv (what
+    // Settings() itself uses via pydantic-settings) does, so it injects
+    // a broken MAX_QUOTA value as a real OS env var that outranks
+    // Settings()'s own correct .env parsing. Settings() already loads
+    // .env itself; nothing here needs to duplicate that.
+    "python.envFile": "",
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestArgs": ["tests"],
+    "python.analysis.exclude": [
+        "frontend/**"
+    ],
+    "[python]": {
+        "editor.defaultFormatter": "charliermarsh.ruff",
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.fixAll.ruff": "explicit",
+            "source.organizeImports.ruff": "explicit"
+        }
+    },
+    "files.watcherExclude": {
+        "**/frontend/node_modules/**": true,
+        "**/frontend/.next/**": true
+    },
+    "search.exclude": {
+        "**/frontend/node_modules": true,
+        "**/frontend/.next": true
+    }
 }

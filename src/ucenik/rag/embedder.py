@@ -33,16 +33,12 @@ def _get_model() -> SentenceTransformer:
 async def embed_documents(texts: list[str]) -> list[list[float]]:
     """Embed chunk text for storage (ingest side)."""
     model = _get_model()
-    vectors = await asyncio.to_thread(
-        model.encode, texts, prompt_name="document", normalize_embeddings=True
-    )
+    vectors = await asyncio.to_thread(model.encode, texts, prompt_name="document", normalize_embeddings=True)
     return vectors.tolist()
 
 
 async def embed_query(text: str) -> list[float]:
     """Embed a search query (retrieval side, Phase 5)."""
     model = _get_model()
-    vectors = await asyncio.to_thread(
-        model.encode, [text], prompt_name="query", normalize_embeddings=True
-    )
+    vectors = await asyncio.to_thread(model.encode, [text], prompt_name="query", normalize_embeddings=True)
     return vectors[0].tolist()

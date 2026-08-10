@@ -5,10 +5,14 @@ not inline in the upload request - see docs/rag-notes.md for why.
 """
 
 import logging
-from datetime import datetime, timezone
+import time
+from datetime import UTC, datetime
 
 from ucenik.cache.ai_cache import get_cached_embedding, set_cached_embedding
+from ucenik.cache.chat_cache import bump_subject_version
+from ucenik.core.quota import check_quota, record_usage
 from ucenik.core.storage import download_file
+from ucenik.errors.user_messages import safe_job_error_message
 from ucenik.models.documents import Document, DocumentStatus
 from ucenik.rag.chunker import chunk_text
 from ucenik.rag.contextualizer import apply_context, generate_context
@@ -26,12 +30,20 @@ async def ingest_document(document_id: str) -> None:
         return
 
     document.status = DocumentStatus.PROCESSING
-    document.updated_at = datetime.now(timezone.utc)
+    document.updated_at = datetime.now(UTC)
     await document.save()
+
+    log_context = {
+        "document_id": str(document.id),
+        "subject_id": document.subject_id,
+        "user_id": document.uploaded_by,
+    }
+    logger.info("ingest.started", extra={"event": "ingest.started", **log_context})
+    start = time.perf_counter()
 
     try:
         raw_bytes = await download_file(document.file_hash)
-        text = extract_text(document.content_type, raw_bytes)
+        text = await extract_text(document.content_type, raw_bytes)
 
         chunks = chunk_text(text)
         if not chunks:
@@ -49,10 +61,14 @@ async def ingest_document(document_id: str) -> None:
             if cached is not None:
                 final_texts[i] = chunk.text
                 embeddings[i] = cached
-            else:
-                context = await generate_context(text, chunk.text)
-                final_texts[i] = apply_context(context, chunk.text)
-                miss_indices.append(i)
+                continue
+
+            await check_quota(document.uploaded_by)
+            result = await generate_context(text, chunk.text)
+            await record_usage(document.uploaded_by, result.total_tokens)
+
+            final_texts[i] = apply_context(result.content, chunk.text)
+            miss_indices.append(i)
 
         # Pass 2: batch-embed everything that missed the cache.
         if miss_indices:
@@ -78,13 +94,35 @@ async def ingest_document(document_id: str) -> None:
         await delete_document_chunks(document.subject_id, str(document.id))
         await upsert_chunks(document.subject_id, chunk_ids, embeddings, final_texts, metadatas)
 
+        # What's retrievable for this subject just changed - invalidate any
+        # cached Tutor answers (cache/chat_cache.py) rather than let them
+        # keep serving pre-update material.
+        await bump_subject_version(document.subject_id)
+
         document.status = DocumentStatus.READY
         document.chunk_count = len(chunks)
         document.error = None
-    except Exception as exc:
-        logger.exception("ingest failed for document %s", document_id)
-        document.status = DocumentStatus.FAILED
-        document.error = str(exc)
 
-    document.updated_at = datetime.now(timezone.utc)
+        logger.info(
+            "ingest.completed",
+            extra={
+                "event": "ingest.completed",
+                **log_context,
+                "chunk_count": len(chunks),
+                "cache_hits": len(chunks) - len(miss_indices),
+                "cache_misses": len(miss_indices),
+                "duration_ms": round((time.perf_counter() - start) * 1000, 2),
+            },
+        )
+    except Exception as exc:
+        # Full detail goes to the logs (str(exc) here, real internals like
+        # "failed to reach the LLM proxy" or "OCR support not yet
+        # implemented") - only the sanitized version is stored on the
+        # document, since that field is read straight back through a plain
+        # GET with no request/response cycle left to redact it at.
+        logger.exception("ingest.failed", extra={"event": "ingest.failed", **log_context, "error": str(exc)})
+        document.status = DocumentStatus.FAILED
+        document.error = safe_job_error_message(exc)
+
+    document.updated_at = datetime.now(UTC)
     await document.save()

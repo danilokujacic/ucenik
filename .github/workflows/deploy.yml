@@ -1,0 +1,105 @@
+name: Deploy
+
+# Auto-deploys on every push to main. No manual gate beyond the test job -
+# see docs/deployment.md for the reasoning and how to change this to
+# workflow_dispatch (manual trigger) if that stops feeling safe enough.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reuses the project's own docker-compose.yaml for infra instead of
+      # GitHub Actions `services:` blocks - services: can't override a
+      # container's command, and MinIO specifically needs `server /data` as
+      # an explicit argument. One definition of "what infra looks like",
+      # not two that can drift.
+      - name: Start infra (Mongo, Redis, Chroma, MinIO)
+        run: docker compose up -d mongodb redis chromadb minio
+
+      - name: Wait for infra to be ready
+        run: sleep 15
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run tests
+        run: uv run pytest -q
+        env:
+          MONGODB_URL: mongodb://admin:admin@localhost:27017/?authSource=admin
+          MONGODB_DB_NAME: ucenik_ci
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: ci-test-secret-not-for-production-use
+          MAX_QUOTA: "200000"
+          S3_ENDPOINT_URL: http://localhost:9000
+          S3_ACCESS_KEY: minioadmin
+          S3_SECRET_KEY: minioadmin
+          S3_BUCKET: documents
+          CHROMA_HOST: localhost
+          CHROMA_PORT: "8000"
+
+      - name: Tear down infra
+        if: always()
+        run: docker compose down -v
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute lowercase image name
+        id: image
+        # ghcr.io requires a lowercase image name; github.repository preserves
+        # whatever case the owner/repo actually has.
+        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:latest
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -e
+            cd "${{ secrets.DEPLOY_PATH }}"
+            docker compose -f docker-compose.yaml -f docker-compose.prod.yaml pull
+            docker compose -f docker-compose.yaml -f docker-compose.prod.yaml up -d
+            docker image prune -f

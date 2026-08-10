@@ -1,0 +1,144 @@
+# Production overlay - adds the app + Celery worker + LLM proxy + Caddy on
+# top of docker-compose.yaml's infra services. Used on the deploy target only:
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.prod.yaml pull
+#   docker compose -f docker-compose.yaml -f docker-compose.prod.yaml up -d
+#
+# Deliberately kept separate from docker-compose.yaml (rather than adding
+# `app`/`worker`/`llm-proxy`/`caddy` there directly) so local dev is
+# unaffected - `docker compose up` during development still only starts
+# infra, same as before; the app runs via `uv run fastapi dev`, the worker
+# via `uv run celery -A ucenik.workers.celery_app worker --pool=solo` (see
+# workers/celery_app.py's docstring on why `--pool=solo`), and the LLM proxy
+# via `uv run fastapi run src/ucenik/llm_proxy/main.py --port 4000` - all on
+# the host for hot-reload. No TLS in dev either - that's a prod-only concern.
+#
+# No `build:` directive here on purpose - this always pulls the image GitHub
+# Actions built and pushed to GHCR (.github/workflows/deploy.yml), it never
+# builds from source on the server itself. `worker` and `llm-proxy` reuse
+# the exact same image as `app` (one Dockerfile, same deps/embedding-model
+# layer) - only the command differs.
+services:
+  app:
+    image: ${GHCR_IMAGE}
+    env_file:
+      - .env
+    ports:
+      # Debug-only, not the public route - Caddy (below) is what actually
+      # fronts this for real traffic on 80/443. Bound to a different host
+      # port than 8000 on purpose: chromadb already claims
+      # 127.0.0.1:8000:8000 below, and 0.0.0.0:8000 (this service's old
+      # binding) silently conflicts with that - 0.0.0.0 already covers the
+      # loopback interface, so both could never actually come up together.
+      # Found by actually reading the port list side by side, not by
+      # hitting the conflict at deploy time.
+      - "127.0.0.1:8001:8000"
+    depends_on:
+      - mongodb
+      - redis
+      - chromadb
+      - minio
+      - llm-proxy
+    restart: unless-stopped
+
+  worker:
+    image: ${GHCR_IMAGE}
+    command: ["uv", "run", "celery", "-A", "ucenik.workers.celery_app", "worker", "--pool=solo", "--loglevel=info"]
+    env_file:
+      - .env
+    depends_on:
+      - mongodb
+      - redis
+      - chromadb
+      - minio
+      - llm-proxy
+    restart: unless-stopped
+
+  # No `ports:` on purpose - only `app`/`worker` need to reach this, over
+  # the docker-internal network by service name (see LLM_PROXY_URL in
+  # .env.prod.example). Never exposed to the host or the public internet.
+  llm-proxy:
+    image: ${GHCR_IMAGE}
+    command: ["uv", "run", "fastapi", "run", "src/ucenik/llm_proxy/main.py", "--host", "0.0.0.0", "--port", "4000"]
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  # Hardening: only `app` needs to be reachable from outside this host - it
+  # talks to everything else over the docker-internal network by service
+  # name regardless of host port bindings. Rebinding these to 127.0.0.1
+  # keeps them reachable for your own debugging (`ssh -L 27017:...`) without
+  # exposing raw Mongo/Redis/Chroma/MinIO to the public internet.
+  mongodb:
+    ports:
+      - "127.0.0.1:27017:27017"
+
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  chromadb:
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  minio:
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+
+  # The only service actually exposed to the public internet. Terminates
+  # TLS (automatic Let's Encrypt cert, no manual cert management) and
+  # reverse-proxies to `app` over the docker-internal network - see
+  # ./Caddyfile. Caddy's reverse_proxy handles WebSocket upgrades
+  # automatically (no special config needed for /ws/plans/{plan_id}).
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  # Local backups (docs/backlog.md item 2) - each loops on its own
+  # interval, dumping/mirroring then pruning anything past
+  # BACKUP_RETENTION_DAYS. No cron on the host, no third-party backup
+  # target - see the scripts themselves (backup/*.sh) for the exact
+  # commands and restore instructions. Entrypoint override means neither
+  # container runs the image's normal server process (mongod / mc's
+  # default) - just the backup loop.
+  backup-mongo:
+    image: mongo:8
+    entrypoint: ["/bin/bash", "/backup/backup-mongo.sh"]
+    env_file:
+      - .env
+    volumes:
+      - ./backup/backup-mongo.sh:/backup/backup-mongo.sh:ro
+      - mongo_backups:/backups
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+
+  backup-minio:
+    image: minio/mc:latest
+    entrypoint: ["/bin/sh", "/backup/backup-minio.sh"]
+    env_file:
+      - .env
+    volumes:
+      - ./backup/backup-minio.sh:/backup/backup-minio.sh:ro
+      - minio_backups:/backups
+    depends_on:
+      - minio
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+  mongo_backups:
+  minio_backups:
