@@ -19,6 +19,25 @@
 # builds from source on the server itself. `worker`, `llm-proxy`, and
 # `embedding-service` reuse the exact same image as `app` (one Dockerfile,
 # same deps/embedding-model layer) - only the command differs.
+#
+# Every service below also carries deploy.resources.limits
+# (docs/security-hardening.md item 9) - without any cap, a burst of
+# concurrent embedding calls (or a runaway process in any one container)
+# could exhaust host memory and take down every *other* service via
+# OOM-killer collateral damage, not just the offending one. Compose v2
+# honors deploy.resources.limits under plain `docker compose up` too (not
+# swarm-only the way it historically was - confirmed against the actually-
+# installed Compose version, v2.35). Sizes below are starting points, not
+# load-tested figures - tune against the real deploy host's specs and
+# actual usage once it's live.
+#
+# Every service also gets an explicit `networks:` (docs/security-
+# hardening.md item 11) instead of the implicit single flat network
+# docker-compose.yaml's dev-only setup uses - see the top-level `networks:`
+# block at the bottom of this file for the two networks and why. Not
+# needed in docker-compose.yaml itself: dev has nothing publicly exposed
+# (the app runs on the host via `uv run fastapi dev`, not in a container),
+# so there's no edge/internal boundary to draw there in the first place.
 services:
   app:
     image: ${GHCR_IMAGE}
@@ -42,6 +61,18 @@ services:
       - llm-proxy
       - embedding-service
     restart: unless-stopped
+    # I/O-bound (DB/Redis/Chroma/S3 calls, HTTP to llm-proxy/embedding-
+    # service) - no ML runtime of its own, so this is a modest cap.
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+    # On both: `edge` to receive from nginx-certbot, `internal` to reach
+    # everything else - the only service that needs to straddle both.
+    networks:
+      - edge
+      - internal
 
   worker:
     image: ${GHCR_IMAGE}
@@ -56,6 +87,15 @@ services:
       - llm-proxy
       - embedding-service
     restart: unless-stopped
+    # Same profile as `app` - runs the same code, just background jobs
+    # (ingest, planner generation) instead of request/response.
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+    networks:
+      - internal
 
   # No `ports:` on purpose - only `app`/`worker` need to reach this, over
   # the docker-internal network by service name (see LLM_PROXY_URL in
@@ -66,6 +106,17 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    # Thin HTTP relay to Groq/HF - no heavy compute of its own.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+    # `internal`, not egress-isolated (see the top-level `networks:` block)
+    # - this is the one service on `internal` that genuinely needs real
+    # outbound internet access, to Groq/HF.
+    networks:
+      - internal
 
   # No `ports:` either, same reasoning as llm-proxy above - internal only.
   # Loads BGE-M3 exactly once (src/ucenik/embedding_service/) rather than
@@ -85,6 +136,17 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    # The heaviest single consumer in this stack (BGE-M3, CPU-only
+    # inference, ~2.3GB baseline just to load the model) - highest limit
+    # of anything here on purpose, with headroom over that baseline for
+    # concurrent request working-set, not just the model weights.
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 3g
+    networks:
+      - internal
 
   # Hardening: only `app` needs to be reachable from outside this host - it
   # talks to everything else over the docker-internal network by service
@@ -94,19 +156,47 @@ services:
   mongodb:
     ports:
       - "127.0.0.1:27017:27017"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+    networks:
+      - internal
 
   redis:
     ports:
       - "127.0.0.1:6379:6379"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+    networks:
+      - internal
 
   chromadb:
     ports:
       - "127.0.0.1:8000:8000"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+    networks:
+      - internal
 
   minio:
     ports:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+    networks:
+      - internal
 
   # The only service actually exposed to the public internet. Replaces
   # Caddy (docs/security-hardening.md item 1 - Caddy is gone from this repo
@@ -134,6 +224,17 @@ services:
     depends_on:
       - app
     restart: unless-stopped
+    # Just terminates TLS and proxies - no real compute of its own.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+    # `edge` only - reaches `app` there and nothing else; has no business
+    # being able to reach mongodb/redis/chromadb/minio directly, which is
+    # the entire point of this split (docs/security-hardening.md item 11).
+    networks:
+      - edge
 
   # Local backups (docs/backlog.md item 2) - each loops on its own
   # interval, dumping/mirroring then pruning anything past
@@ -153,6 +254,16 @@ services:
     depends_on:
       - mongodb
     restart: unless-stopped
+    # mongodump's memory use scales with the data being dumped - bump this
+    # if BACKUP_RETENTION_DAYS/the Mongo dataset ever grows large enough to
+    # actually approach it.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+    networks:
+      - internal
 
   backup-minio:
     image: minio/mc:latest
@@ -165,6 +276,13 @@ services:
     depends_on:
       - minio
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+    networks:
+      - internal
 
 volumes:
   # Certs, account keys, and the auto-generated Diffie-Hellman params
@@ -174,3 +292,23 @@ volumes:
   letsencrypt_certs:
   mongo_backups:
   minio_backups:
+
+# docs/security-hardening.md item 11 - previously every service (including
+# `nginx-certbot`, the only one actually facing the internet) shared one
+# single flat default network, meaning nginx had direct L3 reachability to
+# mongodb/redis/chromadb/minio's real ports regardless of what wasn't
+# published to the host. Split in two:
+# - `edge`: nginx-certbot + app - the one path traffic takes in from the
+#   internet to the API.
+# - `internal`: everything that only ever talks to other backend services.
+# `app` is the only service on both (it has to receive from `edge` and
+# reach `internal`). Not marked `internal: true` (which would additionally
+# deny the network any outbound route at all, not just inbound from
+# `edge`) - `llm-proxy` sits on `internal` and needs real egress to
+# Groq/HF, so full egress-isolation isn't compatible with this network
+# without carving out a third network for that one service alone, which
+# isn't worth the added complexity here. The inbound boundary (nginx can't
+# reach the data stores) is the actual goal and doesn't need it.
+networks:
+  edge:
+  internal:

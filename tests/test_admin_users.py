@@ -5,7 +5,7 @@ from ucenik.enum.user_role import UserRole
 async def test_create_user_requires_authentication(client):
     response = await client.post(
         "/admin/users",
-        json={"email": "new@x.com", "password": "pw", "full_name": "New", "role": "student"},
+        json={"email": "new@x.com", "password": "irrelevant123", "full_name": "New", "role": "student"},
     )
 
     assert response.status_code == 401
@@ -17,7 +17,7 @@ async def test_non_admin_cannot_create_user(client, make_user):
 
     response = await client.post(
         "/admin/users",
-        json={"email": "new@x.com", "password": "pw", "full_name": "New", "role": "student"},
+        json={"email": "new@x.com", "password": "irrelevant123", "full_name": "New", "role": "student"},
         headers=auth_headers(tokens),
     )
 
@@ -30,7 +30,12 @@ async def test_admin_creates_user(client, make_user):
 
     response = await client.post(
         "/admin/users",
-        json={"email": "new-teacher@x.com", "password": "pw123456", "full_name": "New Teacher", "role": "teacher"},
+        json={
+            "email": "new-teacher@x.com",
+            "password": "new-teacher-pw1",
+            "full_name": "New Teacher",
+            "role": "teacher",
+        },
         headers=auth_headers(tokens),
     )
 
@@ -41,7 +46,9 @@ async def test_admin_creates_user(client, make_user):
     assert "password_hash" not in body
 
     # and the created user can actually log in
-    login_response = await client.post("/auth/login", json={"email": "new-teacher@x.com", "password": "pw123456"})
+    login_response = await client.post(
+        "/auth/login", json={"email": "new-teacher@x.com", "password": "new-teacher-pw1"}
+    )
     assert login_response.status_code == 200
 
 
@@ -52,7 +59,7 @@ async def test_duplicate_email_is_rejected_without_leaking_driver_details(client
 
     response = await client.post(
         "/admin/users",
-        json={"email": "taken@x.com", "password": "pw", "full_name": "Dup", "role": "student"},
+        json={"email": "taken@x.com", "password": "irrelevant123", "full_name": "Dup", "role": "student"},
         headers=auth_headers(tokens),
     )
 

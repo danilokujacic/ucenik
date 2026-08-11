@@ -1,6 +1,12 @@
 """Redis-backed rate limiting - fixed window per (client, scope).
 
-Two layers:
+Three layers, in the order the middleware below applies them:
+- The IP blocklist (services/ip_blocklist.py) - an explicit, admin-managed
+  deny, checked first and unconditionally (not gated by
+  settings.rate_limit_enabled - blocking a specific bad actor is a
+  different concern than the general throttle, and should still apply even
+  if that's toggled off). Empty by default, so this is a no-op cost (one
+  Redis GET) for everyone not on it.
 - A global per-IP baseline on every request, generous enough not to bother
   normal usage, there to blunt basic abuse/scraping.
 - A stricter dedicated limit on login specifically (core.security imports
@@ -8,9 +14,9 @@ Two layers:
   case general API abuse isn't, and pre-auth there's no user id to key on,
   only IP.
 
-Gated by settings.rate_limit_enabled (off in tests - see tests/conftest.py -
-a global per-IP limit would otherwise trip against the test suite's own
-rapid-fire requests from a single IP under ASGITransport).
+The latter two are gated by settings.rate_limit_enabled (off in tests - see
+tests/conftest.py - a global per-IP limit would otherwise trip against the
+test suite's own rapid-fire requests from a single IP under ASGITransport).
 """
 
 import logging
@@ -21,6 +27,7 @@ from fastapi.responses import JSONResponse
 from ucenik.core.config import settings
 from ucenik.core.redis import get_redis
 from ucenik.errors.service import RateLimitExceededError
+from ucenik.services.ip_blocklist import is_ip_blocked
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +78,22 @@ async def check_login_rate_limit(request: Request) -> None:
 def register_rate_limiting(app: FastAPI) -> None:
     @app.middleware("http")
     async def rate_limit_middleware(request: Request, call_next):
+        client_ip = _client_ip(request)
+        if await is_ip_blocked(client_ip):
+            # Deliberately checked before routing - this also blocks an
+            # admin trying to reach api/admin_ip_blocklist.py's own DELETE
+            # endpoint from the IP they just blocked. That's an accepted
+            # self-lockout risk inherent to blocking at this layer (an
+            # nginx-level `deny` would have the identical problem) - the
+            # escape hatch is direct Redis access
+            # (`redis-cli DEL ip_blocklist:<ip>`), not another API call.
+            logger.warning("rate_limit.blocked_ip", extra={"event": "rate_limit.blocked_ip", "path": request.url.path})
+            return JSONResponse(status_code=403, content={"detail": "forbidden"})
+
         if not settings.rate_limit_enabled:
             return await call_next(request)
 
-        key = f"ratelimit:global:{_client_ip(request)}"
+        key = f"ratelimit:global:{client_ip}"
         try:
             await _check_and_increment(key, settings.rate_limit_requests_per_minute, 60)
         except RateLimitExceededError as exc:

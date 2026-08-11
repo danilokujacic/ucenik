@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from ucenik.api.admin_ip_blocklist import router as ip_blocklist_router
 from ucenik.api.auth import router as auth_router
 from ucenik.api.chat import router as chat_router
 from ucenik.api.documents import router as documents_router
@@ -65,6 +66,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(auth_router)
+app.include_router(ip_blocklist_router)
 app.include_router(users_router)
 app.include_router(students_router)
 app.include_router(subjects_router)
@@ -73,13 +75,3 @@ app.include_router(chat_router)
 app.include_router(plans_router)
 app.include_router(lectures_router)
 app.include_router(ws_router)
-
-
-@app.get("/")
-def read_root():
-    return {"Hello": "World"}
-
-
-@app.get("/items/{item_id}")
-def read_item(item_id: int, q: str | None = None):
-    return {"item_id": item_id, "q": q}

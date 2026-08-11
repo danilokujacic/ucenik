@@ -2,8 +2,9 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 
+from ucenik.core.password_strength import validate_password_strength
 from ucenik.core.permissions import require_role
 from ucenik.core.security import get_current_user
 from ucenik.enum.user_role import UserRole
@@ -20,11 +21,31 @@ class CreateUserRequest(BaseModel):
     full_name: str
     role: UserRole
 
+    # Account creation - the actual "registration" moment in this app
+    # (there's no self-service signup, see core/password_strength.py's
+    # docstring). Never add the equivalent to api/auth.py's LoginRequest.
+    @field_validator("password")
+    @classmethod
+    def _check_password_strength(cls, value: str) -> str:
+        validate_password_strength(value)
+        return value
+
 
 class UpdateUserRequest(BaseModel):
     full_name: str | None = None
     role: UserRole | None = None
     password: str | None = None  # admin-initiated reset - see services/users.py's update_user docstring
+
+    # Same rule as CreateUserRequest above - a reset is still "a password
+    # value being set", same as registration is. Only runs when a new
+    # password is actually being set (`None` = this update isn't touching
+    # the password at all, nothing to validate).
+    @field_validator("password")
+    @classmethod
+    def _check_password_strength(cls, value: str | None) -> str | None:
+        if value is not None:
+            validate_password_strength(value)
+        return value
 
 
 class UserPublic(BaseModel):

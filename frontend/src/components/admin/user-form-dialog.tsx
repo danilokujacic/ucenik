@@ -6,6 +6,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createUser, updateUser } from "@/lib/api/admin-users";
 import { queryKeys } from "@/lib/query/keys";
 import { describeError } from "@/lib/errors";
+import { passwordStrengthError } from "@/lib/validation/password-strength";
 import type { UserPublic, UserRole } from "@/lib/types/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -75,6 +76,18 @@ export function UserFormDialog({ user, trigger }: { user?: UserPublic; trigger: 
           onSubmit={(e) => {
             e.preventDefault();
             setError(null);
+            // Same "only when a password is actually being set" rule as
+            // the backend's field_validator - on create the field is
+            // always required (see the Input's `required` below) so this
+            // always runs; on edit an empty field means "not resetting
+            // the password," nothing to validate.
+            if (!isEdit || password) {
+              const strengthError = passwordStrengthError(password);
+              if (strengthError) {
+                setError(strengthError);
+                return;
+              }
+            }
             mutation.mutate();
           }}
         >
@@ -104,9 +117,11 @@ export function UserFormDialog({ user, trigger }: { user?: UserPublic; trigger: 
               id="password"
               type="password"
               required={!isEdit}
+              minLength={10}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
+            <p className="text-muted-foreground text-xs">At least 10 characters, not a common password.</p>
           </div>
           <div className="flex flex-col gap-1.5">
             <Label>Role</Label>

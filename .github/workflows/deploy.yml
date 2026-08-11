@@ -53,8 +53,38 @@ jobs:
         if: always()
         run: docker compose down -v
 
+      # docs/security-hardening.md item 13 - fails the job on a known CVE
+      # in any resolved dependency (uv.lock), same "gate, don't just log"
+      # principle as Trivy above. Runs against the same uv-managed
+      # environment `uv sync` just built - no separate install step needed.
+      - name: Audit Python dependencies (pip-audit)
+        run: uvx pip-audit
+
+  frontend-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      # Same gating principle as pip-audit above, for the npm ecosystem -
+      # pnpm's own built-in audit command, no extra tooling needed.
+      - name: Audit frontend dependencies (pnpm audit)
+        working-directory: frontend
+        run: pnpm audit
+
   build-and-push:
-    needs: test
+    needs: [test, frontend-audit]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -75,16 +105,43 @@ jobs:
         # whatever case the owner/repo actually has.
         run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      # Built and loaded into the runner's own local docker daemon, not
+      # pushed yet (docs/security-hardening.md item 10) - Trivy scans it
+      # below, before anything vulnerable ever reaches GHCR. Scanning
+      # after push (e.g. GHCR's own built-in scanning) only ever catches
+      # this after the fact - too late to stop a vulnerable image from
+      # being pullable in the meantime.
+      - name: Build (local, not pushed yet)
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: false
+          load: true
           tags: |
             ${{ steps.image.outputs.name }}:latest
             ${{ steps.image.outputs.name }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Scans both the OS package layer (python:3.14-slim base +
+      # apt-installed tesseract-ocr/poppler-utils) and the Python
+      # dependency layer (uv.lock) for known CVEs. ignore-unfixed: true -
+      # no point failing the build on a CVE with no available fix yet,
+      # there's nothing actionable to do about it today; exit-code 1 is
+      # what actually gates the push below on CRITICAL/HIGH findings that
+      # *do* have a fix available.
+      - name: Scan image for known vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.image.outputs.name }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Push
+        run: |
+          docker push ${{ steps.image.outputs.name }}:latest
+          docker push ${{ steps.image.outputs.name }}:${{ github.sha }}
 
   deploy:
     needs: build-and-push

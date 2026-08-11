@@ -47,11 +47,17 @@ async def test_global_rate_limit_trips_and_is_still_logged(client):
     settings.rate_limit_enabled = True
     settings.rate_limit_requests_per_minute = 3
     try:
+        # No unauthenticated route exists to check a plain 200 against
+        # (there's no self-service anything in this API - see
+        # docs/security-hardening.md item 14's scope note) - GET /subjects
+        # without a token still passes through the same global middleware
+        # and counts the same either way, same as the login test above
+        # accepting 401s as "still counted."
         for _ in range(3):
-            response = await client.get("/")
-            assert response.status_code == 200
+            response = await client.get("/subjects")
+            assert response.status_code == 401
 
-        limited = await client.get("/")
+        limited = await client.get("/subjects")
         assert limited.status_code == 429
         assert "rate limit" in limited.json()["detail"].lower()
         retry_after = int(limited.headers["retry-after"])

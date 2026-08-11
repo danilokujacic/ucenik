@@ -1,0 +1,24 @@
+# docs/security-hardening.md item 13 - the "keep it patched" half that
+# complements the CI-step scanners (pip-audit/pnpm audit, .github/workflows/
+# deploy.yml): those fail a PR/build on a known CVE, this is what actually
+# opens a PR with the fix, so a caught finding doesn't just sit as a red X
+# someone has to manually go figure out how to resolve.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+
+  # The workflow files themselves (actions/checkout, docker/build-push-
+  # action, ...) are a dependency too - same "keep it patched" reasoning
+  # applies to them, not just application code.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
