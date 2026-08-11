@@ -39,14 +39,6 @@ async function refreshAccessToken(): Promise<string | null> {
   }
 }
 
-/** Exposed so a long-lived connection (Planner WS) can proactively get a
- * fresh token before connecting rather than reacting to a failure. */
-export async function ensureFreshAccessToken(): Promise<string | null> {
-  const current = tokenStorage.getAccessToken();
-  if (current) return current;
-  return refreshAccessToken();
-}
-
 interface RequestOptions extends Omit<RequestInit, "body"> {
   body?: unknown; // JSON-serialized unless it's already FormData
   skipAuth?: boolean; // /auth/login, /auth/refresh

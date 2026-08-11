@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { ensureFreshAccessToken, WS_BASE_URL } from "@/lib/api/client";
+import { requestWsTicket } from "@/lib/api/auth";
+import { WS_BASE_URL } from "@/lib/api/client";
 import { queryKeys } from "@/lib/query/keys";
 import type { PlannerWsEvent } from "@/lib/types/api";
 
@@ -11,11 +12,17 @@ export type PlannerSocketStatus = "connecting" | "open" | "closed";
 /**
  * One connection per plan (spec §3.6 point 3/§1) - every lecture in the
  * plan reports progress on this same socket, disambiguated by `lecture_id`.
- * Auth is `?token=` (query param, not a header - the native WebSocket API
- * can't set custom headers). No replay on reconnect (plain Redis pub/sub -
- * spec §1), so a reconnect re-fetches lecture state via React Query
- * invalidation instead of trusting the socket alone for anything missed
- * during the gap.
+ * Auth is `?ticket=` (query param, not a header - the native WebSocket API
+ * can't set custom headers) - a short-lived, single-use ticket fetched via
+ * a normal Authorization-header request (lib/api/auth.ts's requestWsTicket,
+ * backend services/ws_tickets.py), not the real access token. Putting the
+ * actual access token in a URL was the previous (and less safe) approach -
+ * see docs/security-hardening.md item 8 for why that changed. A fresh
+ * ticket is requested on every connect/reconnect since each one is single-
+ * use and expires in seconds, not something to cache alongside the access
+ * token. No replay on reconnect (plain Redis pub/sub - spec §1), so a
+ * reconnect re-fetches lecture state via React Query invalidation instead
+ * of trusting the socket alone for anything missed during the gap.
  */
 export function usePlannerSocket(subjectId: string, planId: string) {
   const [status, setStatus] = useState<PlannerSocketStatus>("connecting");
@@ -29,15 +36,17 @@ export function usePlannerSocket(subjectId: string, planId: string) {
     let attempt = 0;
 
     async function connect() {
-      const token = await ensureFreshAccessToken();
-      if (cancelled) return;
-      if (!token) {
-        setStatus("closed");
+      let ticket: string;
+      try {
+        ({ ticket } = await requestWsTicket());
+      } catch {
+        if (!cancelled) setStatus("closed");
         return;
       }
+      if (cancelled) return;
 
       setStatus("connecting");
-      const ws = new WebSocket(`${WS_BASE_URL}/ws/plans/${planId}?token=${encodeURIComponent(token)}`);
+      const ws = new WebSocket(`${WS_BASE_URL}/ws/plans/${planId}?ticket=${encodeURIComponent(ticket)}`);
       socketRef.current = ws;
 
       ws.onopen = () => {

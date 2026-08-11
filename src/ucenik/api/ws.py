@@ -6,9 +6,14 @@ without the browser polling. See services/planner_ws.py for the auth/
 authorization checks below.
 
 Auth note: the browser's native WebSocket API can't set custom headers (no
-Authorization header), so the access token goes as a query parameter
-(`?token=...`) instead - the one endpoint in this API where that's the
-case; every other endpoint uses the Authorization header like normal.
+Authorization header), so *something* has to go as a query parameter
+instead - the one endpoint in this API where that's the case; every other
+endpoint uses the Authorization header like normal. That something is a
+short-lived, single-use ticket (`?ticket=...`), not the real access token -
+see services/ws_tickets.py's module docstring for why (a raw access token
+sitting in a URL - server/proxy logs, browser history - was a real
+exposure risk the ticket exchange (api/auth.py's POST /auth/ws-ticket)
+closes off; see docs/security-hardening.md item 8).
 
 Connect-before-publish note: Redis pub/sub has no replay - a message
 published before this endpoint's subscribe() call runs is gone forever for
@@ -28,13 +33,13 @@ router = APIRouter(tags=["planner-ws"])
 
 
 @router.websocket("/ws/plans/{plan_id}")
-async def plan_progress(websocket: WebSocket, plan_id: str, token: str) -> None:
+async def plan_progress(websocket: WebSocket, plan_id: str, ticket: str) -> None:
     # Rejecting the handshake (close() before accept()) rather than
     # accepting then immediately closing - a valid ASGI WebSocket response
     # to the connect event, same as FastAPI's own documented WS-auth pattern.
-    user = await authenticate_ws_user(token)
+    user = await authenticate_ws_user(ticket)
     if user is None:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="invalid or expired token")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="invalid, expired, or already-used ticket")
         return
 
     plan = await get_plan_or_none(plan_id)

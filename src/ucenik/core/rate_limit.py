@@ -46,6 +46,17 @@ async def _check_and_increment(key: str, max_requests: int, window_seconds: int)
 
 
 def _client_ip(request: Request) -> str:
+    """request.client.host is the app's own view of who it's talking to -
+    in prod that's nginx (docker-compose.prod.yaml's `nginx-certbot`), not
+    the real client, UNLESS uvicorn's ProxyHeadersMiddleware has rewritten
+    it from X-Forwarded-For first. That rewrite is enabled by the
+    Dockerfile's --forwarded-allow-ips=* flag (see its comment for the full
+    story) - without it, every request here would resolve to nginx's own
+    container IP, and this whole module would be rate-limiting one "client"
+    (nginx) instead of real ones. No header-parsing needed on this end -
+    by the time Starlette hands us `request`, the substitution already
+    happened.
+    """
     return request.client.host if request.client else "unknown"
 
 

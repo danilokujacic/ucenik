@@ -148,3 +148,10 @@ export interface AccessTokenResponse {
   token_type: "bearer";
   expires_in: number;
 }
+
+/** POST /auth/ws-ticket - a short-lived, single-use ticket for
+ * `/ws/plans/{plan_id}` (lib/planner/use-planner-socket.ts), not the real
+ * access token. See backend services/ws_tickets.py for why. */
+export interface WsTicketResponse {
+  ticket: string;
+}

@@ -58,7 +58,15 @@ def _answer_key(subject_id: str, version: int, question: str) -> str:
     return f"chat_cache:answer:{subject_id}:{version}:{digest}"
 
 
-async def _current_version(subject_id: str) -> int:
+async def get_content_version(subject_id: str) -> int:
+    """A subject's current "content version" - bumped once by
+    bump_subject_version() on anything that changes what's retrievable
+    (ingest, delete). Originally just this module's own cache-key
+    ingredient; also reused by rag/retriever.py to invalidate its
+    in-process BM25 corpus cache on the exact same signal, rather than
+    inventing a second versioning scheme for what's really the same
+    question ("has this subject's retrievable content changed?").
+    """
     raw = await get_redis().get(_version_key(subject_id))
     return int(raw) if raw is not None else 1
 
@@ -72,7 +80,7 @@ async def bump_subject_version(subject_id: str) -> None:
 
 
 async def get_cached_answer(subject_id: str, question: str) -> CachedAnswer | None:
-    version = await _current_version(subject_id)
+    version = await get_content_version(subject_id)
     raw = await get_redis().get(_answer_key(subject_id, version, question))
     if raw is None:
         return None
@@ -89,7 +97,7 @@ async def set_cached_answer(
     completion_tokens: int,
     total_tokens: int,
 ) -> None:
-    version = await _current_version(subject_id)
+    version = await get_content_version(subject_id)
     answer = CachedAnswer(
         content=content,
         sources=sources,

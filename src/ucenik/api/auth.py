@@ -8,6 +8,7 @@ from ucenik.core.rate_limit import check_login_rate_limit
 from ucenik.core.security import get_current_user
 from ucenik.models.users import User
 from ucenik.services import auth as auth_service
+from ucenik.services.ws_tickets import issue_ws_ticket
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -38,6 +39,10 @@ class AccessTokenResponse(BaseModel):
     expires_in: int
 
 
+class WsTicketResponse(BaseModel):
+    ticket: str
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(payload: LoginRequest, _rl: Annotated[None, Depends(check_login_rate_limit)]) -> TokenResponse:
     user = await auth_service.authenticate(payload.email, payload.password)
@@ -59,3 +64,15 @@ async def logout(payload: LogoutRequest) -> None:
 @router.get("/me", response_model=UserPublic)
 async def me(user: Annotated[User, Depends(get_current_user)]) -> UserPublic:
     return UserPublic(id=str(user.id), email=user.email, full_name=user.full_name, role=user.role)
+
+
+@router.post("/ws-ticket", response_model=WsTicketResponse)
+async def ws_ticket(user: Annotated[User, Depends(get_current_user)]) -> WsTicketResponse:
+    """Normal Authorization-header auth in, a short-lived single-use ticket
+    out - see services/ws_tickets.py's module docstring for why this exists.
+    The frontend calls this right before opening `/ws/plans/{plan_id}` and
+    passes the ticket as `?ticket=`, instead of putting the real access
+    token in that URL.
+    """
+    ticket = await issue_ws_ticket(str(user.id))
+    return WsTicketResponse(ticket=ticket)

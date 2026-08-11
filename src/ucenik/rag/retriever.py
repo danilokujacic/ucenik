@@ -5,6 +5,19 @@ Dense embeddings are great at semantic matching but can miss exact terms
 (a rare acronym, a specific formula, a proper noun the model never learned
 to weight); BM25 is the reverse - bad at meaning, excellent at "this exact
 word appears." Running both and merging catches what either alone misses.
+
+BM25 corpus caching (docs/security-hardening.md): every query used to
+re-fetch a subject's *entire* corpus out of Chroma and rebuild a fresh
+BM25Okapi index from scratch, even for the same subject asked ten questions
+in a row with nothing re-ingested in between - real, uncapped CPU/memory
+work with no cost ceiling beyond the generic per-IP rate limit. Now cached
+per-process (module-level dict, not Redis - a BM25Okapi object isn't
+trivially serializable, and `app`/`worker` each retrieving independently is
+fine at this cost, unlike the embedding-model duplication embedding_service
+exists to avoid), keyed on the subject's content version
+(cache/chat_cache.py's get_content_version() - the exact same signal
+already bumped on every ingest/delete, reused rather than inventing a
+second invalidation scheme).
 """
 
 import re
@@ -12,8 +25,11 @@ from dataclasses import dataclass
 
 from rank_bm25 import BM25Okapi
 
+from ucenik.cache.chat_cache import get_content_version
 from ucenik.rag.embedder import embed_query
 from ucenik.rag.vector_store import get_all_chunks, query_similar
+
+_bm25_cache: dict[str, tuple[int, list[dict], BM25Okapi]] = {}
 
 # How many candidates each side of the hybrid search contributes to the
 # fusion pool, before trimming down to the final `k` returned to the caller.
@@ -42,6 +58,27 @@ def _tokenize(text: str) -> list[str]:
     return _TOKEN_PATTERN.findall(text.lower())
 
 
+async def _get_corpus_and_bm25(subject_id: str) -> tuple[list[dict], BM25Okapi] | None:
+    """Cache hit: skips both the Chroma fetch and the BM25Okapi rebuild.
+    Cache miss (nothing cached yet, or the subject's content version moved
+    since the last cache) - fetch + rebuild once, cache the result under
+    the version that was current at fetch time.
+    """
+    version = await get_content_version(subject_id)
+    cached = _bm25_cache.get(subject_id)
+    if cached is not None and cached[0] == version:
+        return cached[1], cached[2]
+
+    corpus = await get_all_chunks(subject_id)
+    if not corpus:
+        _bm25_cache.pop(subject_id, None)
+        return None
+
+    bm25 = BM25Okapi([_tokenize(chunk["text"]) for chunk in corpus])
+    _bm25_cache[subject_id] = (version, corpus, bm25)
+    return corpus, bm25
+
+
 async def retrieve(subject_id: str, query: str, k: int = 5) -> list[RetrievedChunk]:
     """Top-`k` chunks for `query`, scoped to one subject's collection.
 
@@ -50,19 +87,21 @@ async def retrieve(subject_id: str, query: str, k: int = 5) -> list[RetrievedChu
     ground an answer in" and say so honestly, not silently answer from the
     model's own knowledge (see docs/rag-notes.md's "honest failure" note).
     """
-    corpus = await get_all_chunks(subject_id)
-    if not corpus:
+    cached = await _get_corpus_and_bm25(subject_id)
+    if cached is None:
         return []
+    corpus, bm25 = cached
 
     corpus_by_id = {chunk["id"]: chunk for chunk in corpus}
 
-    # Sparse side: BM25 over every chunk's raw text. Rebuilt per-query - this
-    # is an in-memory pass over one subject's chunks, not a persistent index
-    # (see vector_store.get_all_chunks's docstring on the scale this holds up to).
-    bm25 = BM25Okapi([_tokenize(chunk["text"]) for chunk in corpus])
+    # Sparse side: BM25 over every chunk's raw text - see _get_corpus_and_bm25
+    # for the caching that now avoids rebuilding this on every single query.
     sparse_scores = bm25.get_scores(_tokenize(query))
     sparse_ranked_ids = [
-        chunk_id for chunk_id, _ in sorted(zip((c["id"] for c in corpus), sparse_scores), key=lambda pair: -pair[1])
+        chunk_id
+        for chunk_id, _ in sorted(
+            zip((c["id"] for c in corpus), sparse_scores, strict=True), key=lambda pair: -pair[1]
+        )
     ][:_CANDIDATE_POOL_SIZE]
 
     # Dense side: cosine similarity via Chroma's index.

@@ -364,3 +364,25 @@ async def test_filename_is_sanitized(client, make_user):
     assert "<" not in filename
     assert ">" not in filename
     assert "/" not in filename
+
+
+async def test_oversized_upload_rejected_via_content_length_before_reading(client, make_user):
+    """The Content-Length pre-check (api/documents.py) should reject before
+    ever calling file.read() - patching MAX_FILE_SIZE down to something tiny
+    makes this fast to exercise without actually uploading tens of MB.
+    """
+    await make_user("teacher@x.com", UserRole.TEACHER)
+    tokens = await login(client, "teacher@x.com", "password123")
+    subject_id = await _create_subject(client, auth_headers(tokens))
+
+    with (
+        patch("ucenik.api.documents.MAX_FILE_SIZE", 10),
+        patch("ucenik.services.documents.ingest_document", AsyncMock()),
+    ):
+        response = await client.post(
+            f"/subjects/{subject_id}/documents",
+            files={"file": ("big.txt", b"this is well over ten bytes", "text/plain")},
+            headers=auth_headers(tokens),
+        )
+
+    assert response.status_code == 413

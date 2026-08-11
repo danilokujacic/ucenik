@@ -1,12 +1,12 @@
 # Production overlay - adds the app + Celery worker + LLM proxy +
-# embedding service + Caddy on top of docker-compose.yaml's infra services.
+# embedding service + nginx on top of docker-compose.yaml's infra services.
 # Used on the deploy target only:
 #
 #   docker compose -f docker-compose.yaml -f docker-compose.prod.yaml pull
 #   docker compose -f docker-compose.yaml -f docker-compose.prod.yaml up -d
 #
 # Deliberately kept separate from docker-compose.yaml (rather than adding
-# `app`/`worker`/`llm-proxy`/`caddy` there directly) so local dev is
+# `app`/`worker`/`llm-proxy`/`nginx-certbot` there directly) so local dev is
 # unaffected - `docker compose up` during development still only starts
 # infra, same as before; the app runs via `uv run fastapi dev`, the worker
 # via `uv run celery -A ucenik.workers.celery_app worker --pool=solo` (see
@@ -25,7 +25,7 @@ services:
     env_file:
       - .env
     ports:
-      # Debug-only, not the public route - Caddy (below) is what actually
+      # Debug-only, not the public route - nginx (below) is what actually
       # fronts this for real traffic on 80/443. Bound to a different host
       # port than 8000 on purpose: chromadb already claims
       # 127.0.0.1:8000:8000 below, and 0.0.0.0:8000 (this service's old
@@ -108,22 +108,29 @@ services:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
 
-  # The only service actually exposed to the public internet. Terminates
-  # TLS (automatic Let's Encrypt cert, no manual cert management) and
-  # reverse-proxies to `app` over the docker-internal network - see
-  # ./Caddyfile. Caddy's reverse_proxy handles WebSocket upgrades
-  # automatically (no special config needed for /ws/plans/{plan_id}).
-  caddy:
-    image: caddy:2-alpine
+  # The only service actually exposed to the public internet. Replaces
+  # Caddy (docs/security-hardening.md item 1 - Caddy is gone from this repo
+  # entirely now). Terminates TLS via Let's Encrypt (same automatic-renewal
+  # deal Caddy gave for free - jonasal/nginx-certbot wraps nginx + certbot's
+  # own renewal loop, no cron/manual step on this end) and reverse-proxies
+  # to `app` over the docker-internal network - see
+  # nginx/templates/app.conf.template for the actual server block (unlike
+  # Caddy's reverse_proxy, nginx needs the WebSocket-upgrade headers and
+  # client_max_body_size spelled out explicitly - that file's comments cover
+  # why). DOMAIN is envsubst'd into that template at container start by the
+  # image's own entrypoint hook; CERTBOT_EMAIL is required by Let's Encrypt
+  # to contact you about certificate/account issues.
+  nginx-certbot:
+    image: jonasal/nginx-certbot:5-alpine
     ports:
       - "80:80"
       - "443:443"
     environment:
       DOMAIN: ${DOMAIN}
+      CERTBOT_EMAIL: ${CERTBOT_EMAIL}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      - ./nginx/templates:/etc/nginx/templates:ro
+      - letsencrypt_certs:/etc/letsencrypt
     depends_on:
       - app
     restart: unless-stopped
@@ -160,7 +167,10 @@ services:
     restart: unless-stopped
 
 volumes:
-  caddy_data:
-  caddy_config:
+  # Certs, account keys, and the auto-generated Diffie-Hellman params
+  # (nginx/templates/app.conf.template) - persisted so a container
+  # restart/redeploy doesn't re-request a cert from Let's Encrypt (which
+  # is rate-limited) or regenerate dhparams (which takes a couple minutes).
+  letsencrypt_certs:
   mongo_backups:
   minio_backups:

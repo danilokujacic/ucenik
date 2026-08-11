@@ -89,8 +89,17 @@ async def generate_lecture(lecture_id: str, attempt: int = 0) -> None:
     await publish_progress(lecture.plan_id, {"type": "lecture.generating", "lecture_id": str(lecture.id)})
 
     try:
-        chunks = await retrieve(lecture.subject_id, lecture.topic)
+        # Quota gates retrieval, not just generation - retrieve() calls
+        # embed_query(), a real (if smaller) compute cost on
+        # embedding_service that a user who's already exhausted their
+        # daily quota shouldn't be able to keep triggering for free just
+        # by generating more lectures. Mirrors services/chat.py's
+        # ask_question flow, which already checks quota before its
+        # equivalent retrieve() call ever runs (see prepare_answer_stream's
+        # own docstring on why - it checks before the retrieval-calling
+        # generator is even constructed).
         await check_quota(lecture.created_by)
+        chunks = await retrieve(lecture.subject_id, lecture.topic)
         result = await generate_lecture_content(lecture.topic, chunks)
         await record_usage(lecture.created_by, result.total_tokens)
 

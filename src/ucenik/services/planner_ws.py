@@ -1,29 +1,28 @@
 """Auth + authorization for the Planner progress WebSocket
 (`/ws/plans/{plan_id}`, api/ws.py) - see that file's module docstring for
-the transport-level notes (query-param auth, connect-before-publish).
+the transport-level notes (ticket-based auth, connect-before-publish), and
+services/ws_tickets.py for why this is a ticket exchange rather than the
+raw access token going straight into the URL.
 """
 
-import jwt
 from beanie import PydanticObjectId
 
 from ucenik.core.permissions import is_subject_owner
-from ucenik.core.security import TokenType, decode_token
 from ucenik.models.plans import Plan
 from ucenik.models.subjects import Subject
 from ucenik.models.users import User
+from ucenik.services.ws_tickets import consume_ws_ticket
 
 
-async def authenticate_ws_user(token: str) -> User | None:
-    try:
-        payload = decode_token(token)
-    except jwt.InvalidTokenError:
+async def authenticate_ws_user(ticket: str) -> User | None:
+    """Consumes `ticket` (single use - a second call with the same value
+    always returns None, see consume_ws_ticket) and resolves it to the user
+    it was issued for.
+    """
+    user_id = await consume_ws_ticket(ticket)
+    if user_id is None or not PydanticObjectId.is_valid(user_id):
         return None
-    if payload.get("type") != TokenType.ACCESS.value:
-        return None
-    subject_claim = payload.get("sub", "")
-    if not PydanticObjectId.is_valid(subject_claim):
-        return None
-    return await User.get(PydanticObjectId(subject_claim))
+    return await User.get(PydanticObjectId(user_id))
 
 
 async def get_plan_or_none(plan_id: str) -> Plan | None:

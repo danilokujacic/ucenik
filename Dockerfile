@@ -48,4 +48,21 @@ RUN uv run python -c "from chonkie import RecursiveChunker; RecursiveChunker(tok
 
 EXPOSE 8000
 
-CMD ["uv", "run", "fastapi", "run", "src/ucenik/main.py", "--host", "0.0.0.0", "--port", "8000"]
+# --forwarded-allow-ips="*": `fastapi run` already trusts X-Forwarded-For/
+# -Proto/-Port by default (--proxy-headers is on unless disabled), but only
+# from peers in --forwarded-allow-ips, which itself defaults to just
+# "127.0.0.1" - the nginx-certbot container that actually sits in front of
+# this in prod (docker-compose.prod.yaml) connects over the docker-internal
+# network under its own container IP, not 127.0.0.1, so that default quietly
+# never matched and every request's X-Forwarded-For was ignored: every
+# request looked like it came from nginx's own container IP
+# (core/rate_limit.py's _client_ip(), keyed off request.client.host, was
+# rate-limiting "nginx" instead of the real client - see docs/security-
+# hardening.md). "*" is safe specifically because `app` has no other public
+# route in - no `ports:` published on the docker-internal network beyond a
+# 127.0.0.1-bound debug port (docker-compose.prod.yaml), so the only things
+# that can ever connect here to begin with are already-trusted containers on
+# this same host. A literal container IP would be more precise but isn't
+# stable across restarts, and there's no separate untrusted path this would
+# need to defend against.
+CMD ["uv", "run", "fastapi", "run", "src/ucenik/main.py", "--host", "0.0.0.0", "--port", "8000", "--forwarded-allow-ips=*"]
