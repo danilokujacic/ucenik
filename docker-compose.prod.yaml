@@ -1,5 +1,6 @@
-# Production overlay - adds the app + Celery worker + LLM proxy + Caddy on
-# top of docker-compose.yaml's infra services. Used on the deploy target only:
+# Production overlay - adds the app + Celery worker + LLM proxy +
+# embedding service + Caddy on top of docker-compose.yaml's infra services.
+# Used on the deploy target only:
 #
 #   docker compose -f docker-compose.yaml -f docker-compose.prod.yaml pull
 #   docker compose -f docker-compose.yaml -f docker-compose.prod.yaml up -d
@@ -15,9 +16,9 @@
 #
 # No `build:` directive here on purpose - this always pulls the image GitHub
 # Actions built and pushed to GHCR (.github/workflows/deploy.yml), it never
-# builds from source on the server itself. `worker` and `llm-proxy` reuse
-# the exact same image as `app` (one Dockerfile, same deps/embedding-model
-# layer) - only the command differs.
+# builds from source on the server itself. `worker`, `llm-proxy`, and
+# `embedding-service` reuse the exact same image as `app` (one Dockerfile,
+# same deps/embedding-model layer) - only the command differs.
 services:
   app:
     image: ${GHCR_IMAGE}
@@ -39,6 +40,7 @@ services:
       - chromadb
       - minio
       - llm-proxy
+      - embedding-service
     restart: unless-stopped
 
   worker:
@@ -52,6 +54,7 @@ services:
       - chromadb
       - minio
       - llm-proxy
+      - embedding-service
     restart: unless-stopped
 
   # No `ports:` on purpose - only `app`/`worker` need to reach this, over
@@ -60,6 +63,25 @@ services:
   llm-proxy:
     image: ${GHCR_IMAGE}
     command: ["uv", "run", "fastapi", "run", "src/ucenik/llm_proxy/main.py", "--host", "0.0.0.0", "--port", "4000"]
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  # No `ports:` either, same reasoning as llm-proxy above - internal only.
+  # Loads BGE-M3 exactly once (src/ucenik/embedding_service/) rather than
+  # `app` and `worker` each loading their own independent copy - see that
+  # package's module docstring for the full reasoning. If this ever needs
+  # to move to its own dedicated host (it's the single heaviest CPU/RAM
+  # consumer in this stack - CPU-only inference, no GPU here), just point
+  # EMBEDDING_SERVICE_URL at it - rag/embedder.py is a plain HTTP client,
+  # same as llm/proxy_client.py, no code changes needed either way. Doing
+  # that for real needs actual network-level access control though (a VPC/
+  # WireGuard/firewall-scoped rule) - the "no ports: on this docker
+  # network" trick only protects it while it stays on this one host.
+  embedding-service:
+    image: ${GHCR_IMAGE}
+    command:
+      ["uv", "run", "fastapi", "run", "src/ucenik/embedding_service/main.py", "--host", "0.0.0.0", "--port", "4001"]
     env_file:
       - .env
     restart: unless-stopped

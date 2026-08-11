@@ -6,14 +6,15 @@ rag/ingest.py's ingest_document, called by FastAPI BackgroundTasks there);
 the Celery task is just `run_async(the_async_function(...))`, dispatched via
 `.delay()` from api/lectures.py.
 
-Auto-retry (docs/backlog.md item 7): only `LLMProxyError` - a transient
-upstream failure - gets retried, up to `_MAX_RETRIES` times with backoff.
-Anything else (QuotaExceededError, a bug, a malformed lecture) goes
-straight to `status: failed` with no retry, since retrying immediately
-can't fix a quota that's still exceeded or a bug that's still a bug. The
-async functions themselves stay the source of truth for "give up and mark
-failed" (via `_mark_failed`, called on the final attempt or a
-non-retryable exception) - they just *raise* LLMProxyError instead of
+Auto-retry (docs/backlog.md item 7): only `LLMProxyError`/`EmbeddingServiceError`
+- transient upstream failures, whether that's the LLM proxy or the embedding
+service (retrieve() calls the latter) - get retried, up to `_MAX_RETRIES`
+times with backoff. Anything else (QuotaExceededError, a bug, a malformed
+lecture) goes straight to `status: failed` with no retry, since retrying
+immediately can't fix a quota that's still exceeded or a bug that's still a
+bug. The async functions themselves stay the source of truth for "give up
+and mark failed" (via `_mark_failed`, called on the final attempt or a
+non-retryable exception) - they just *raise* the transient error instead of
 swallowing it when a retry attempt remains, and it's the Celery task
 wrapper (bind=True, has `self.request.retries`) that turns that raise into
 an actual scheduled retry.
@@ -41,6 +42,7 @@ from ucenik.errors.user_messages import safe_job_error_message
 from ucenik.llm.proxy_client import LLMProxyError
 from ucenik.models.lecture_versions import LectureVersion, VersionSource
 from ucenik.models.lectures import Lecture, LectureStatus
+from ucenik.rag.embedder import EmbeddingServiceError
 from ucenik.rag.refiner import RefineTransform, generate_lecture_content, refine_lecture_content
 from ucenik.rag.retriever import retrieve
 from ucenik.workers.celery_app import celery_app, run_async
@@ -48,6 +50,10 @@ from ucenik.workers.celery_app import celery_app, run_async
 logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
+
+# Both are "a downstream service this task depends on is transiently
+# unreachable" - same retry treatment either way, see module docstring.
+_TRANSIENT_ERRORS = (LLMProxyError, EmbeddingServiceError)
 
 
 async def _next_version_number(lecture_id: str) -> int:
@@ -101,7 +107,7 @@ async def generate_lecture(lecture_id: str, attempt: int = 0) -> None:
         lecture.error = None
         await lecture.save()
         await publish_progress(lecture.plan_id, {"type": "lecture.ready", "lecture_id": str(lecture.id), "version": 1})
-    except LLMProxyError as exc:
+    except _TRANSIENT_ERRORS as exc:
         if attempt < _MAX_RETRIES:
             logger.warning("planner.generate.retrying lecture=%s attempt=%d", lecture_id, attempt + 1)
             await publish_progress(
@@ -169,7 +175,7 @@ async def refine_lecture(lecture_id: str, transform: str, target_language: str |
             lecture.plan_id,
             {"type": "lecture.ready", "lecture_id": str(lecture.id), "version": next_version},
         )
-    except LLMProxyError as exc:
+    except _TRANSIENT_ERRORS as exc:
         if attempt < _MAX_RETRIES:
             logger.warning("planner.refine.retrying lecture=%s attempt=%d", lecture_id, attempt + 1)
             await publish_progress(
@@ -193,13 +199,13 @@ async def refine_lecture(lecture_id: str, transform: str, target_language: str |
 def generate_lecture_task(self, lecture_id: str) -> None:
     try:
         run_async(generate_lecture(lecture_id, attempt=self.request.retries))
-    except LLMProxyError as exc:
-        raise self.retry(exc=exc, countdown=min(5 * (2**self.request.retries), 60))
+    except _TRANSIENT_ERRORS as exc:
+        raise self.retry(exc=exc, countdown=min(5 * (2**self.request.retries), 60)) from exc
 
 
 @celery_app.task(bind=True, name="planner.refine_lecture", max_retries=_MAX_RETRIES)
 def refine_lecture_task(self, lecture_id: str, transform: str, target_language: str | None = None) -> None:
     try:
         run_async(refine_lecture(lecture_id, transform, target_language, attempt=self.request.retries))
-    except LLMProxyError as exc:
-        raise self.retry(exc=exc, countdown=min(5 * (2**self.request.retries), 60))
+    except _TRANSIENT_ERRORS as exc:
+        raise self.retry(exc=exc, countdown=min(5 * (2**self.request.retries), 60)) from exc

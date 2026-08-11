@@ -16,16 +16,20 @@ function only controls the copy a user actually sees.
 
 from ucenik.errors.service import QuotaExceededError
 from ucenik.llm.proxy_client import LLMProxyError
+from ucenik.rag.embedder import EmbeddingServiceError
 from ucenik.rag.extractor import UnsupportedDocumentError
 
-_LLM_PROXY_UNAVAILABLE = "Processing is temporarily unavailable. Please try again shortly."
+_BACKEND_SERVICE_UNAVAILABLE = "Processing is temporarily unavailable. Please try again shortly."
 _NO_EXTRACTABLE_TEXT = "No readable text could be found in this document."
 _GENERIC = "An unexpected error occurred. Please try again."
 
 
 def safe_job_error_message(exc: Exception) -> str:
-    if isinstance(exc, LLMProxyError):
-        return _LLM_PROXY_UNAVAILABLE
+    # Same user-facing message either way - "the LLM proxy is down" and
+    # "the embedding service is down" both from this project's own doing,
+    # neither is something a teacher/student needs to distinguish.
+    if isinstance(exc, (LLMProxyError, EmbeddingServiceError)):
+        return _BACKEND_SERVICE_UNAVAILABLE
     if isinstance(exc, UnsupportedDocumentError):
         return _NO_EXTRACTABLE_TEXT
     if isinstance(exc, QuotaExceededError):

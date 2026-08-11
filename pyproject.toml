@@ -42,6 +42,7 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.16.2",
+    "testcontainers[mongodb,redis]>=4.13.3",
 ]
 
 [tool.pytest.ini_options]

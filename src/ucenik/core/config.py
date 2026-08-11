@@ -68,8 +68,22 @@ class Settings(BaseSettings):
     # after working around its trust_remote_code and xformers requirements -
     # a real upstream incompatibility, not a config issue. BGE-M3 is a
     # standard transformers architecture, no custom code needed at all.
+    #
+    # embedding_model here is only for rag/chunker.py's tokenizer (sizing
+    # chunks in tokens) - a lightweight artifact, not the full model with
+    # weights. The full model itself is loaded exactly once, by the
+    # self-hosted embedding service (src/ucenik/embedding_service/), not by
+    # this app or the Celery worker directly - see rag/embedder.py, which
+    # is an HTTP client to that service now, same shape as llm/proxy_client.py
+    # relates to llm_proxy. Loading BGE-M3 (~2.3GB, CPU-only inference) in
+    # both `app` and `worker` independently - two separate OS processes,
+    # each with its own model singleton - would double that cost for zero
+    # benefit; the embedding service exists specifically to avoid that.
     embedding_model: str = "BAAI/bge-m3"
     embedding_max_tokens: int = 8192  # confirmed from the loaded model
+    embedding_service_url: str = "http://localhost:4001"
+    embedding_service_api_key: str = ""
+    embedding_service_timeout_seconds: float = 60.0  # CPU-only inference - generous vs. an LLM call's timeout
 
     # Chunking - sized in tokens using the embedding model's own tokenizer
     # (token-accurate, not a char-count approximation - matters across
