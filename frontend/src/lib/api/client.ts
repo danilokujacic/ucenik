@@ -8,28 +8,47 @@ export const WS_BASE_URL =
 
 // A single in-flight refresh is shared across concurrent 401s so a burst of
 // requests whose access token just expired doesn't fire N refresh calls.
-let refreshPromise: Promise<string | null> | null = null;
+let refreshPromise: Promise<RefreshOutcome> | null = null;
 
-async function refreshAccessToken(): Promise<string | null> {
+/** Distinguishes *why* a refresh attempt didn't produce a new token -
+ * "invalid" is the server explicitly rejecting the refresh token (expired,
+ * revoked, malformed - a real verdict), "network" is the fetch itself never
+ * completing (offline, a dropped connection, a momentary server hiccup, the
+ * browser deprioritizing/aborting a background tab's request - nothing to
+ * do with whether the refresh token is actually still good). Conflating the
+ * two used to force-logout a user with a perfectly valid session just
+ * because one refresh request happened to fail for an unrelated reason -
+ * only "invalid" should ever clear stored tokens and send someone to
+ * /login; "network" should surface as a retryable failure instead. */
+type RefreshOutcome = { ok: true; token: string } | { ok: false; reason: "invalid" | "network" };
+
+async function refreshAccessToken(): Promise<RefreshOutcome> {
   if (refreshPromise) return refreshPromise;
 
-  refreshPromise = (async () => {
+  refreshPromise = (async (): Promise<RefreshOutcome> => {
     const refreshToken = tokenStorage.getRefreshToken();
-    if (!refreshToken) return null;
+    if (!refreshToken) return { ok: false, reason: "invalid" };
 
+    let res: Response;
     try {
-      const res = await fetch(`${API_BASE_URL}/auth/refresh`, {
+      res = await fetch(`${API_BASE_URL}/auth/refresh`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ refresh_token: refreshToken }),
       });
-      if (!res.ok) return null;
-      const data: AccessTokenResponse = await res.json();
-      tokenStorage.setTokens(data.access_token);
-      return data.access_token;
     } catch {
-      return null;
+      return { ok: false, reason: "network" };
     }
+
+    if (!res.ok) {
+      // A real HTTP response, the server explicitly saying no - this is
+      // the genuine "refresh token isn't good anymore" verdict.
+      return { ok: false, reason: "invalid" };
+    }
+
+    const data: AccessTokenResponse = await res.json();
+    tokenStorage.setTokens(data.access_token);
+    return { ok: true, token: data.access_token };
   })();
 
   try {
@@ -95,12 +114,20 @@ export async function authorizedRequest(path: string, options: RequestOptions = 
   });
 
   if (res.status === 401 && !skipAuth && !isRetry) {
-    const newToken = await refreshAccessToken();
-    if (newToken) {
+    const outcome = await refreshAccessToken();
+    if (outcome.ok) {
       return authorizedRequest(path, { ...options, isRetry: true });
     }
-    tokenStorage.forceLogout();
-    throw new ApiError(401, "Session expired. Please log in again.");
+    if (outcome.reason === "invalid") {
+      tokenStorage.forceLogout();
+      throw new ApiError(401, "Session expired. Please log in again.");
+    }
+    // Network-level failure refreshing - the stored refresh token may
+    // still be perfectly valid, so tokens are deliberately NOT cleared
+    // and the user is NOT sent to /login over what could be a momentary
+    // connectivity blip. This one call still fails; the next attempt (or
+    // a manual retry) gets a fair shot once the network/server recovers.
+    throw new ApiError(0, "Network error - please check your connection and try again.");
   }
 
   if (!res.ok) {

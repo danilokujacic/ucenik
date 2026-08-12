@@ -29,7 +29,7 @@ plain-text stand-in.
 """
 
 from ucenik.llm.proxy_client import StreamedCompletion, stream_complete
-from ucenik.rag.formatting import CONTENT_FORMATTING_INSTRUCTIONS
+from ucenik.rag.formatting import CONTENT_FORMATTING_INSTRUCTIONS, CONTENT_FORMATTING_REMINDER
 from ucenik.rag.prompt_safety import flag_if_suspicious, random_tag
 from ucenik.rag.retriever import RetrievedChunk
 
@@ -75,8 +75,28 @@ def build_messages(
     a fixed "<context>" - see the module docstring above for why.
     """
     context_tag = random_tag("context")
-    system_content = f"{_system_prompt(context_tag)}\n\n<{context_tag}>\n{_format_context(chunks)}\n</{context_tag}>"
+    system_content = (
+        f"{_system_prompt(context_tag)}\n\n"
+        f"<{context_tag}>\n{_format_context(chunks)}\n</{context_tag}>\n\n"
+        f"{CONTENT_FORMATTING_REMINDER}"
+    )
     return [{"role": "system", "content": system_content}, *history, {"role": "user", "content": question}]
+
+
+_MAX_ANSWER_TOKENS = 4096  # generous headroom for a genuinely long, multi-document answer, not unbounded
+
+# Discourages the model from repeating itself - found live (not theoretical):
+# a broad, legitimately-large request ("make a test from each document I
+# uploaded") triggered a real degenerate repetition loop against the actual
+# deployed model, streaming the same content over and over into the chat
+# window with nothing to stop it early. Low temperature (below) makes this
+# more likely, not less - less randomness means fewer chances to break out
+# of a repeating pattern once one starts. frequency_penalty is the standard
+# mitigation for exactly this failure mode; _MAX_ANSWER_TOKENS below is the
+# hard backstop regardless - even if a loop starts anyway, this bounds how
+# much damage (streamed garbage, burned quota) it can do before generation
+# is forcibly cut off.
+_REPETITION_FREQUENCY_PENALTY = 0.4
 
 
 async def stream_answer(
@@ -89,4 +109,9 @@ async def stream_answer(
     consistent/literal about what the material actually says, not creative.
     """
     messages = build_messages(chunks, history, question)
-    return await stream_complete(messages, temperature=0.2)
+    return await stream_complete(
+        messages,
+        temperature=0.2,
+        max_tokens=_MAX_ANSWER_TOKENS,
+        frequency_penalty=_REPETITION_FREQUENCY_PENALTY,
+    )

@@ -30,7 +30,10 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
       <Avatar className="mt-0.5 size-7 shrink-0">
         <AvatarFallback className="text-[10px]">{isUser ? "You" : "AI"}</AvatarFallback>
       </Avatar>
-      <div className={`flex max-w-[80%] flex-col gap-2 ${isUser ? "items-end" : "items-start"}`}>
+      {/* max-w-[90%] on small screens, [80%] from sm: up - 80% of a narrow
+          phone screen wastes proportionally more space than 80% of a
+          desktop viewport does. */}
+      <div className={`flex max-w-[90%] flex-col gap-2 sm:max-w-[80%] ${isUser ? "items-end" : "items-start"}`}>
         <div
           className={
             isUser

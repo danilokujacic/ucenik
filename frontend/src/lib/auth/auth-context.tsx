@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import * as authApi from "@/lib/api/auth";
 import { API_BASE_URL } from "@/lib/api/client";
 import { tokenStorage } from "@/lib/auth/token-storage";
+import { ApiError } from "@/lib/errors";
 import type { UserPublic } from "@/lib/types/api";
 
 type AuthStatus = "loading" | "authenticated" | "unauthenticated";
@@ -39,8 +40,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setUser(me);
           setStatus("authenticated");
         }
-      } catch {
-        tokenStorage.clear();
+      } catch (err) {
+        // A network-level failure (lib/api/client.ts's ApiError with
+        // status 0 - the refresh fetch itself never completed, not the
+        // server rejecting the refresh token) does NOT mean the stored
+        // tokens are actually bad - don't destroy a possibly-still-valid
+        // session over what could be a momentary connectivity blip on
+        // page load. Any other failure genuinely does mean the session is
+        // over (and if it came from a real invalid-refresh-token 401,
+        // lib/api/client.ts already ran tokenStorage.forceLogout() before
+        // this ever threw - clearing again here is just a safe fallback
+        // for any other kind of failure).
+        if (!(err instanceof ApiError && err.status === 0)) {
+          tokenStorage.clear();
+        }
         if (!cancelled) {
           setUser(null);
           setStatus("unauthenticated");

@@ -67,11 +67,20 @@ async def complete(
     model: str | None = None,
     temperature: float = 0.7,
     max_tokens: int | None = None,
+    frequency_penalty: float | None = None,
 ) -> CompletionResult:
     """Send a chat-completion request to the proxy. Retries transient HTTP
     failures with backoff, and short-circuits via a circuit breaker once the
     proxy looks consistently down. Every call (success or failure) emits a
     structured "llm.call" log event - see docs/observability.md.
+
+    frequency_penalty (docs/security-hardening.md-adjacent note, see
+    rag/generator.py's stream_answer for where this actually matters): a
+    positive value discourages the model from repeating the same tokens -
+    the standard OpenAI-compatible mitigation for degenerate repetition
+    loops, more likely at low temperature. llm_proxy/main.py passes the
+    whole request body through to the real provider unmodified (besides
+    overriding `model`), so this reaches Groq/HF directly.
     """
     resolved_model = model or settings.llm_proxy_model
     payload: dict[str, Any] = {
@@ -81,6 +90,8 @@ async def complete(
     }
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
+    if frequency_penalty is not None:
+        payload["frequency_penalty"] = frequency_penalty
 
     async def _call() -> CompletionResult:
         async with httpx.AsyncClient(
@@ -163,6 +174,7 @@ async def stream_complete(
     model: str | None = None,
     temperature: float = 0.7,
     max_tokens: int | None = None,
+    frequency_penalty: float | None = None,
 ) -> StreamedCompletion:
     """Streaming counterpart to complete() - for Tutor chat (rag/generator.py),
     where the answer needs to reach the browser token-by-token via SSE
@@ -183,6 +195,15 @@ async def stream_complete(
     `stream_options.include_usage`) one chunk carrying a top-level `usage`
     object - same placeholder-contract caveat as complete(), see module
     docstring.
+
+    See complete()'s frequency_penalty docstring - same parameter, same
+    reasoning, more load-bearing here specifically: a chat answer streams
+    directly to the browser as it's generated, so a degenerate repetition
+    loop here doesn't fail cleanly, it just keeps visibly streaming
+    repeated/looping content into the user's chat window for as long as it
+    runs (found live: asking for a lecture-length answer covering every
+    uploaded document - a real, legitimately long generation task - could
+    trigger this).
     """
     resolved_model = model or settings.llm_proxy_model
     payload: dict[str, Any] = {
@@ -194,6 +215,8 @@ async def stream_complete(
     }
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
+    if frequency_penalty is not None:
+        payload["frequency_penalty"] = frequency_penalty
 
     result = StreamedCompletion(resolved_model)
 

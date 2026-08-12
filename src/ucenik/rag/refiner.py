@@ -23,7 +23,7 @@ injection phrasing and logged (never blocked) on a match.
 from enum import Enum
 
 from ucenik.llm.proxy_client import CompletionResult, complete
-from ucenik.rag.formatting import CONTENT_FORMATTING_INSTRUCTIONS
+from ucenik.rag.formatting import CONTENT_FORMATTING_INSTRUCTIONS, CONTENT_FORMATTING_REMINDER
 from ucenik.rag.prompt_safety import flag_if_suspicious, random_tag
 from ucenik.rag.retriever import RetrievedChunk
 from ucenik.rag.translation import translate_content
@@ -68,6 +68,15 @@ _REFINE_INSTRUCTIONS: dict[RefineTransform, str] = {
 }
 
 
+# Same reasoning as rag/generator.py's identical constants - neither of
+# these calls had any cap before, and a lecture is exactly the kind of
+# "genuinely long, open-ended" generation task where a degenerate
+# repetition loop (more likely at low temperature, see below) could run
+# for a very long time with nothing to stop it early.
+_MAX_LECTURE_TOKENS = 4096
+_REPETITION_FREQUENCY_PENALTY = 0.4
+
+
 def _format_context(chunks: list[RetrievedChunk]) -> str:
     if not chunks:
         return (
@@ -86,12 +95,18 @@ async def generate_lecture_content(topic: str, chunks: list[RetrievedChunk]) -> 
             "role": "system",
             "content": (
                 f"{_generation_system_prompt(context_tag)}\n\n"
-                f"<{context_tag}>\n{_format_context(chunks)}\n</{context_tag}>"
+                f"<{context_tag}>\n{_format_context(chunks)}\n</{context_tag}>\n\n"
+                f"{CONTENT_FORMATTING_REMINDER}"
             ),
         },
         {"role": "user", "content": f"Write lecture content on: {topic}"},
     ]
-    return await complete(messages, temperature=0.5)
+    return await complete(
+        messages,
+        temperature=0.5,
+        max_tokens=_MAX_LECTURE_TOKENS,
+        frequency_penalty=_REPETITION_FREQUENCY_PENALTY,
+    )
 
 
 async def refine_lecture_content(
@@ -117,4 +132,9 @@ async def refine_lecture_content(
         },
         {"role": "user", "content": current_content},
     ]
-    return await complete(messages, temperature=0.5)
+    return await complete(
+        messages,
+        temperature=0.5,
+        max_tokens=_MAX_LECTURE_TOKENS,
+        frequency_penalty=_REPETITION_FREQUENCY_PENALTY,
+    )
