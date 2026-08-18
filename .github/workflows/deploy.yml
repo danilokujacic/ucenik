@@ -112,7 +112,7 @@ jobs:
       # this after the fact - too late to stop a vulnerable image from
       # being pullable in the meantime.
       - name: Build (local, not pushed yet)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
