@@ -26,6 +26,7 @@ from ucenik.models.chat_sessions import ChatSession
 from ucenik.models.subjects import Subject
 from ucenik.models.users import User
 from ucenik.rag.generator import stream_answer
+from ucenik.rag.query_rewriter import clean_rewrite, rewrite_query
 from ucenik.rag.retriever import RetrievedChunk, retrieve
 from ucenik.rag.titler import generate_title
 
@@ -130,6 +131,42 @@ def _unique_sources(chunks: list[RetrievedChunk]) -> list[SourceRef]:
     return list(seen.values())
 
 
+async def _retrieval_query(session: ChatSession, user_id: str, history: list[dict[str, str]], question: str) -> str:
+    """The text to actually search with - see rag/query_rewriter.py for why
+    a follow-up question can't be searched as-is.
+
+    No history (a session's first question) -> the question itself, no LLM
+    call. Rewrite fails -> also the question itself: rewriting improves
+    retrieval but isn't required for it, so a proxy hiccup here shouldn't
+    cost the student their whole answer (if the proxy is genuinely down,
+    the generation call right after will surface that properly anyway).
+    """
+    if not history:
+        return question
+
+    try:
+        result = await rewrite_query(history, question)
+    except LLMProxyError as exc:
+        logger.warning(
+            "chat.query_rewrite_failed",
+            extra={"event": "chat.query_rewrite_failed", "session_id": str(session.id), "error": str(exc)},
+        )
+        return question
+
+    await record_usage(user_id, result.total_tokens)
+    rewritten = clean_rewrite(result.content, question)
+    logger.info(
+        "chat.query_rewritten",
+        extra={
+            "event": "chat.query_rewritten",
+            "session_id": str(session.id),
+            "original_query": question,
+            "rewritten_query": rewritten,
+        },
+    )
+    return rewritten
+
+
 async def _stream_answer_events(
     session: ChatSession,
     user_id: str,
@@ -184,7 +221,11 @@ async def _stream_answer_events(
         )
         return
 
-    chunks = await retrieve(session.subject_id, question)
+    # Search with a standalone version of the question (follow-ups rewritten
+    # using history), but answer the student's original wording - see
+    # _retrieval_query.
+    search_query = await _retrieval_query(session, user_id, history, question)
+    chunks = await retrieve(session.subject_id, search_query)
     sources = _unique_sources(chunks)
 
     try:

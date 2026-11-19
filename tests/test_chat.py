@@ -265,7 +265,13 @@ async def test_second_question_in_a_session_never_uses_cache(client, make_user):
     session_id = session.json()["id"]
 
     mock_stream = AsyncMock(return_value=fake_stream_completion(["Answer."]))
-    with patch("ucenik.rag.generator.stream_complete", mock_stream):
+    with (
+        patch("ucenik.rag.generator.stream_complete", mock_stream),
+        patch(
+            "ucenik.rag.query_rewriter.complete",
+            AsyncMock(return_value=fake_completion("What are the stages of mitosis?")),
+        ),
+    ):
         await client.post(
             f"/subjects/{subject_id}/chat/sessions/{session_id}/messages",
             json={"question": "What are the stages of mitosis?"},
@@ -525,3 +531,100 @@ async def test_sources_deduplicated_by_document_id(client, make_user):
     assert response.status_code == 200
     done = [data for event, data in _parse_sse(response.text) if event == "done"][0]
     assert [s["document_id"] for s in done["sources"]] == ["doc-1", "doc-2"]
+
+
+async def _ask(client, tokens, subject_id, session_id, question):
+    return await client.post(
+        f"/subjects/{subject_id}/chat/sessions/{session_id}/messages",
+        json={"question": question},
+        headers=auth_headers(tokens),
+    )
+
+
+async def test_follow_up_question_is_rewritten_for_retrieval_only(client, make_user):
+    """A follow-up gets searched as its standalone rewrite (rag/query_rewriter.py),
+    but the generator still answers the student's original wording.
+    """
+    from ucenik.rag.retriever import retrieve as real_retrieve
+
+    await make_user("teacher@x.com", UserRole.TEACHER)
+    tokens = await login(client, "teacher@x.com", "password123")
+    subject_id = await _ready_subject(client, auth_headers(tokens))
+    session = await client.post(f"/subjects/{subject_id}/chat/sessions", headers=auth_headers(tokens))
+    session_id = session.json()["id"]
+
+    with patch("ucenik.rag.generator.stream_complete", AsyncMock(return_value=fake_stream_completion(["Four."]))):
+        await _ask(client, tokens, subject_id, session_id, "What are the stages of mitosis?")
+
+    mock_rewrite_llm = AsyncMock(return_value=fake_completion("What happens during anaphase of mitosis?"))
+    mock_stream = AsyncMock(return_value=fake_stream_completion(["Chromatids separate."]))
+    with (
+        patch("ucenik.rag.query_rewriter.complete", mock_rewrite_llm),
+        patch("ucenik.services.chat.retrieve", wraps=real_retrieve) as spy,
+        patch("ucenik.rag.generator.stream_complete", mock_stream),
+    ):
+        response = await _ask(client, tokens, subject_id, session_id, "and what happens in the third one?")
+
+    assert response.status_code == 200
+    # the rewriter saw the earlier turn it needs to resolve "the third one"
+    rewrite_prompt = mock_rewrite_llm.call_args.args[0][1]["content"]
+    assert "What are the stages of mitosis?" in rewrite_prompt
+    # retrieval searched with the rewrite...
+    assert spy.call_args.args[1] == "What happens during anaphase of mitosis?"
+    # ...but the generator's final user turn is the student's original text
+    generator_messages = mock_stream.call_args.args[0]
+    assert generator_messages[-1] == {"role": "user", "content": "and what happens in the third one?"}
+
+
+async def test_first_question_skips_the_rewrite(client, make_user):
+    await make_user("teacher@x.com", UserRole.TEACHER)
+    tokens = await login(client, "teacher@x.com", "password123")
+    subject_id = await _ready_subject(client, auth_headers(tokens))
+    session = await client.post(f"/subjects/{subject_id}/chat/sessions", headers=auth_headers(tokens))
+    session_id = session.json()["id"]
+
+    mock_rewrite = AsyncMock()
+    with (
+        patch("ucenik.services.chat.rewrite_query", mock_rewrite),
+        patch("ucenik.rag.generator.stream_complete", AsyncMock(return_value=fake_stream_completion(["Four."]))),
+    ):
+        response = await _ask(client, tokens, subject_id, session_id, "What are the stages of mitosis?")
+
+    assert response.status_code == 200
+    mock_rewrite.assert_not_called()
+
+
+async def test_rewrite_failure_falls_back_to_the_original_question(client, make_user):
+    """The rewrite is an improvement, not a requirement - a proxy failure on
+    it must not cost the student their answer.
+    """
+    await make_user("teacher@x.com", UserRole.TEACHER)
+    tokens = await login(client, "teacher@x.com", "password123")
+    subject_id = await _ready_subject(client, auth_headers(tokens))
+    session = await client.post(f"/subjects/{subject_id}/chat/sessions", headers=auth_headers(tokens))
+    session_id = session.json()["id"]
+
+    with patch("ucenik.rag.generator.stream_complete", AsyncMock(return_value=fake_stream_completion(["Four."]))):
+        await _ask(client, tokens, subject_id, session_id, "What are the stages of mitosis?")
+
+    mock_retrieve = AsyncMock(return_value=[])
+    with (
+        patch("ucenik.services.chat.rewrite_query", AsyncMock(side_effect=LLMProxyError("proxy down"))),
+        patch("ucenik.services.chat.retrieve", mock_retrieve),
+        patch("ucenik.rag.generator.stream_complete", AsyncMock(return_value=fake_stream_completion(["Hmm."]))),
+    ):
+        response = await _ask(client, tokens, subject_id, session_id, "and the third one?")
+
+    assert response.status_code == 200
+    assert [e for e, _ in _parse_sse(response.text)][-1] == "done"
+    assert mock_retrieve.call_args.args[1] == "and the third one?"
+
+
+def test_clean_rewrite_falls_back_on_unusable_output():
+    from ucenik.rag.query_rewriter import clean_rewrite
+
+    original = "and the third one?"
+    assert clean_rewrite('  "What happens in anaphase?"  ', original) == "What happens in anaphase?"
+    assert clean_rewrite("", original) == original
+    assert clean_rewrite("Anaphase.\nDuring anaphase, chromatids...", original) == original
+    assert clean_rewrite("x" * 1000, original) == original
