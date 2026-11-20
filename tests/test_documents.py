@@ -386,3 +386,91 @@ async def test_oversized_upload_rejected_via_content_length_before_reading(clien
         )
 
     assert response.status_code == 413
+
+
+# --- Breadcrumbs + the chunk cache --------------------------------------------
+
+_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def _docx_bytes(sections: list[tuple[str, str]]) -> bytes:
+    import io
+
+    from docx import Document
+
+    doc = Document()
+    for heading, body in sections:
+        doc.add_heading(heading, 1)
+        doc.add_paragraph(body)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+async def _upload(client, tokens, subject_id, filename, data, content_type, blurb):
+    mock = AsyncMock(return_value=fake_completion(blurb))
+    with patch("ucenik.rag.contextualizer.complete", mock):
+        upload = await client.post(
+            f"/subjects/{subject_id}/documents",
+            files={"file": (filename, data, content_type)},
+            headers=auth_headers(tokens),
+        )
+        assert upload.status_code == 201, upload.text
+    return upload.json()["id"], mock
+
+
+async def _stored_texts(subject_id: str, document_id: str) -> dict[str, str]:
+    """breadcrumb -> stored chunk text, for one document."""
+    from ucenik.rag.vector_store import get_all_chunks
+
+    return {
+        c["metadata"]["breadcrumb"]: c["text"]
+        for c in await get_all_chunks(subject_id)
+        if c["metadata"]["document_id"] == document_id
+    }
+
+
+async def test_stored_chunk_is_breadcrumb_then_blurb_then_text(client, make_user):
+    await make_user("teacher@x.com", UserRole.TEACHER)
+    tokens = await login(client, "teacher@x.com", "password123")
+    subject_id = await _create_subject(client, auth_headers(tokens))
+
+    data = _docx_bytes([("Mitosis", "It has four stages.")])
+    document_id, _ = await _upload(client, tokens, subject_id, "bio.docx", data, _DOCX, "About cell division.")
+
+    stored = await _stored_texts(subject_id, document_id)
+    assert stored["bio.docx > Mitosis"].startswith("bio.docx > Mitosis\nAbout cell division.\n\n")
+
+
+async def test_edited_reupload_reuses_cached_blurbs_for_unchanged_chunks(client, make_user):
+    """The bug this fixes: a cache hit used to restore only the embedding, so
+    the stored text silently lost its blurb on every edited re-upload."""
+    await make_user("teacher@x.com", UserRole.TEACHER)
+    tokens = await login(client, "teacher@x.com", "password123")
+    subject_id = await _create_subject(client, auth_headers(tokens))
+
+    original = _docx_bytes([("Mitosis", "Mitosis has four stages."), ("Meiosis", "Meiosis makes gametes.")])
+    await _upload(client, tokens, subject_id, "bio.docx", original, _DOCX, "Blurb from first upload.")
+
+    edited = _docx_bytes([("Mitosis", "Mitosis has four stages."), ("Meiosis", "Meiosis makes four gametes.")])
+    document_id, mock = await _upload(client, tokens, subject_id, "bio.docx", edited, _DOCX, "Blurb from re-upload.")
+
+    assert mock.await_count == 1  # only the edited Meiosis chunk needed a new blurb
+    stored = await _stored_texts(subject_id, document_id)
+    assert "Blurb from first upload." in stored["bio.docx > Mitosis"]  # restored from cache, not dropped
+    assert "Blurb from re-upload." in stored["bio.docx > Meiosis"]
+
+
+async def test_identical_text_in_another_file_gets_its_own_blurb(client, make_user):
+    await make_user("teacher@x.com", UserRole.TEACHER)
+    tokens = await login(client, "teacher@x.com", "password123")
+    subject_id = await _create_subject(client, auth_headers(tokens))
+
+    shared = ("Instructions", "Answer every question in full sentences.")
+    first = _docx_bytes([("Mitosis", "Worksheet on mitosis."), shared])
+    second = _docx_bytes([("Photosynthesis", "Worksheet on photosynthesis."), shared])
+    await _upload(client, tokens, subject_id, "mitosis.docx", first, _DOCX, "Mitosis worksheet.")
+    document_id, mock = await _upload(client, tokens, subject_id, "plants.docx", second, _DOCX, "Plants worksheet.")
+
+    assert mock.await_count == 2  # no cache hit borrowed from mitosis.docx
+    assert "Plants worksheet." in (await _stored_texts(subject_id, document_id))["plants.docx > Instructions"]

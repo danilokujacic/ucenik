@@ -95,6 +95,12 @@ class Settings(BaseSettings):
     chunk_size: int = 400
     chunk_overlap: int = 50
 
+    # Small-to-big retrieval (rag/retriever.py): search matches small chunks,
+    # but each hit is handed to the LLM together with this many neighboring
+    # chunks on each side, stitched into one passage. 1 = up to 3 chunks per
+    # hit (~3x the context tokens per answer); 0 turns expansion off.
+    retrieval_neighbor_window: int = 1
+
     # Rate limiting (core/rate_limit.py) - disabled in tests (see
     # tests/conftest.py) since a global per-IP limit would otherwise trip
     # against the test suite's own rapid-fire requests from one IP.

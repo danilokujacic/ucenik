@@ -95,3 +95,67 @@ async def test_empty_corpus_is_not_cached_and_returns_empty_list():
 
     assert result == []
     assert "empty-subject" not in retriever_module._bm25_cache
+
+
+# --- Neighbor expansion (small-to-big) --------------------------------------
+
+
+def _doc_chunk(document_id: str, index: int, crumb: str) -> dict:
+    return {
+        "id": f"{document_id}_{index}",
+        "text": f"{crumb}\nblurb\n\nchunk {index} with overlap",
+        "metadata": {
+            "document_id": document_id,
+            "chunk_index": index,
+            "source_filename": "bio.txt",
+            "breadcrumb": crumb,
+            "raw_text": f"[{document_id}:{index}]",
+        },
+    }
+
+
+# d1: chunks 0-2 under "Cells", 3-5 under "Plants"; d2: a separate document
+_CORPUS = [_doc_chunk("d1", i, "bio.txt > Cells" if i < 3 else "bio.txt > Plants") for i in range(6)] + [
+    _doc_chunk("d2", i, "other.txt") for i in range(3)
+]
+_POSITIONS = {retriever_module._position(c): c for c in _CORPUS}
+_BY_ID = {c["id"]: c for c in _CORPUS}
+
+
+def _expand(hit_ids: list[str], window: int = 1):
+    return retriever_module._expand_with_neighbors([_BY_ID[i] for i in hit_ids], _POSITIONS, window)
+
+
+def test_hit_is_returned_with_its_neighbors_stitched_from_raw_text():
+    [passage] = _expand(["d1_1"])
+    assert passage.text == "bio.txt > Cells\n\n[d1:0][d1:1][d1:2]"
+    assert passage.id == "d1_1"
+
+
+def test_adjacent_hits_merge_into_one_passage_across_a_heading_boundary():
+    [passage] = _expand(["d1_2", "d1_3"])
+    assert passage.text == "bio.txt > Cells\n\n[d1:1][d1:2]\n\nbio.txt > Plants\n\n[d1:3][d1:4]"
+    assert passage.id == "d1_2"  # the better-ranked hit names the passage
+
+
+def test_a_hit_bridging_two_passages_merges_all_three():
+    passages = _expand(["d1_0", "d1_4", "d1_2"])
+    assert len(passages) == 1
+    assert "[d1:0][d1:1][d1:2]" in passages[0].text and "[d1:3][d1:4][d1:5]" in passages[0].text
+
+
+def test_hits_from_different_documents_never_merge_and_keep_rank_order():
+    passages = _expand(["d2_1", "d1_1"])
+    assert [p.document_id for p in passages] == ["d2", "d1"]
+    assert passages[0].text == "other.txt\n\n[d2:0][d2:1][d2:2]"
+
+
+def test_window_zero_disables_expansion():
+    [passage] = _expand(["d1_1"], window=0)
+    assert passage.text == _BY_ID["d1_1"]["text"]
+
+
+def test_chunk_ingested_before_raw_text_existed_passes_through_unchanged():
+    legacy = {"id": "old_0", "text": "Legacy chunk text.", "metadata": {"document_id": "old", "source_filename": "a"}}
+    [passage] = retriever_module._expand_with_neighbors([legacy], _POSITIONS, 1)
+    assert passage.text == "Legacy chunk text."

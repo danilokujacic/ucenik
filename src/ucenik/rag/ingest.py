@@ -1,6 +1,7 @@
-"""Ingest pipeline orchestrator - ties together extraction, chunking,
-contextual enrichment, embedding, caching, and vector storage for one
-uploaded document. Runs as a FastAPI BackgroundTask (see api/documents.py),
+"""Ingest pipeline orchestrator - ties together structured extraction,
+per-section chunking, breadcrumbs + contextual enrichment, embedding,
+caching, and vector storage for one uploaded document. Runs as a FastAPI
+BackgroundTask (see api/documents.py),
 not inline in the upload request - see docs/rag-notes.md for why.
 """
 
@@ -8,16 +9,16 @@ import logging
 import time
 from datetime import UTC, datetime
 
-from ucenik.cache.ai_cache import get_cached_embedding, set_cached_embedding
+from ucenik.cache.ai_cache import CachedChunk, get_cached_chunk, set_cached_chunk
 from ucenik.cache.chat_cache import bump_subject_version
 from ucenik.core.quota import check_quota, record_usage
 from ucenik.core.storage import download_file
 from ucenik.errors.user_messages import safe_job_error_message
 from ucenik.models.documents import Document, DocumentStatus
-from ucenik.rag.chunker import chunk_text
+from ucenik.rag.chunker import breadcrumb, chunk_sections
 from ucenik.rag.contextualizer import apply_context, generate_context
 from ucenik.rag.embedder import embed_documents
-from ucenik.rag.extractor import extract_text
+from ucenik.rag.extractor import extract_sections, render_sections
 from ucenik.rag.vector_store import delete_document_chunks, upsert_chunks
 
 logger = logging.getLogger(__name__)
@@ -43,49 +44,72 @@ async def ingest_document(document_id: str) -> None:
 
     try:
         raw_bytes = await download_file(document.file_hash)
-        text = await extract_text(document.content_type, raw_bytes)
+        sections = await extract_sections(document.content_type, raw_bytes)
+        document_text = render_sections(sections)
 
-        chunks = chunk_text(text)
+        chunks = chunk_sections(sections)
         if not chunks:
             raise ValueError("chunking produced zero chunks")
 
-        # Pass 1: cache lookup (keyed on the RAW chunk text, not the
-        # contextualized one - a hit skips the LLM context call too, not
-        # just the embedding call) + contextual enrichment for misses.
-        final_texts: list[str | None] = [None] * len(chunks)
+        # Free context first: every chunk's heading path, e.g.
+        # "photosynthesis.pdf > Chapter 3 > The Calvin cycle".
+        locations = [breadcrumb(document.filename, c.heading_path) for c in chunks]
+
+        # Pass 1: cache lookup (a hit restores both the blurb and the
+        # embedding - skips the LLM context call AND the embedding call) +
+        # contextual enrichment for misses, shown the text around the chunk.
+        contexts: list[str] = [""] * len(chunks)
         embeddings: list[list[float] | None] = [None] * len(chunks)
         miss_indices: list[int] = []
 
         for i, chunk in enumerate(chunks):
-            cached = await get_cached_embedding(chunk.text)
+            cached = await get_cached_chunk(document.subject_id, locations[i], chunk.text)
             if cached is not None:
-                final_texts[i] = chunk.text
-                embeddings[i] = cached
+                contexts[i] = cached.context
+                embeddings[i] = cached.embedding
                 continue
 
             await check_quota(document.uploaded_by)
-            result = await generate_context(text, chunk.text)
+            result = await generate_context(
+                document_text,
+                locations[i],
+                chunk.text,
+                text_before=chunks[i - 1].raw_text if i > 0 else "",
+                text_after=chunks[i + 1].raw_text if i + 1 < len(chunks) else "",
+            )
             await record_usage(document.uploaded_by, result.total_tokens)
 
-            final_texts[i] = apply_context(result.content, chunk.text)
+            contexts[i] = result.content.strip()
             miss_indices.append(i)
+
+        # Identical for hits and misses: breadcrumb + blurb + chunk - what
+        # gets embedded is exactly what gets stored (BM25 + the Tutor read it).
+        final_texts = [apply_context(locations[i], contexts[i], c.text) for i, c in enumerate(chunks)]
 
         # Pass 2: batch-embed everything that missed the cache.
         if miss_indices:
-            texts_to_embed = [final_texts[i] for i in miss_indices]
-            fresh_embeddings = await embed_documents(texts_to_embed)
-            for i, embedding in zip(miss_indices, fresh_embeddings):
+            fresh_embeddings = await embed_documents([final_texts[i] for i in miss_indices])
+            for i, embedding in zip(miss_indices, fresh_embeddings, strict=True):
                 embeddings[i] = embedding
-                await set_cached_embedding(chunks[i].text, embedding)
+                await set_cached_chunk(
+                    document.subject_id,
+                    locations[i],
+                    chunks[i].text,
+                    CachedChunk(context=contexts[i], embedding=embedding),
+                )
 
         chunk_ids = [f"{document.id}_{c.index}" for c in chunks]
+        # breadcrumb + raw_text are for rag/retriever.py's neighbor expansion:
+        # stitching a hit and the chunks around it into one clean passage.
         metadatas = [
             {
                 "document_id": str(document.id),
                 "chunk_index": c.index,
                 "source_filename": document.filename,
+                "breadcrumb": locations[i],
+                "raw_text": c.raw_text,
             }
-            for c in chunks
+            for i, c in enumerate(chunks)
         ]
 
         # Delete old chunks first - re-ingest safety net: if the new version
