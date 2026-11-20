@@ -19,6 +19,7 @@ if that ever changes upstream.
 import httpx
 
 from ucenik.core.config import settings
+from ucenik.rag import trace
 
 
 class EmbeddingServiceError(Exception):
@@ -45,7 +46,9 @@ async def _embed(texts: list[str], prompt_name: str) -> list[list[float]]:
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise EmbeddingServiceError("failed to reach the embedding service") from exc
-        return response.json()["embeddings"]
+        embeddings = response.json()["embeddings"]
+        trace.record("embedding_call", prompt_name=prompt_name, texts=texts, vectors=embeddings)
+        return embeddings
 
 
 async def embed_documents(texts: list[str]) -> list[list[float]]:

@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     # hit (~3x the context tokens per answer); 0 turns expansion off.
     retrieval_neighbor_window: int = 1
 
+    # Full-content RAG trace files (rag/trace.py): set to a directory (e.g.
+    # "rag_traces") to write one .md + .json per upload and per Tutor
+    # question. Empty = off. Ignored unless environment == "development" -
+    # the files contain document text and student questions.
+    rag_trace_dir: str = ""
+
     # Rate limiting (core/rate_limit.py) - disabled in tests (see
     # tests/conftest.py) since a global per-IP limit would otherwise trip
     # against the test suite's own rapid-fire requests from one IP.

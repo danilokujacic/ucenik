@@ -26,6 +26,7 @@ import httpx
 
 from ucenik.core.config import settings
 from ucenik.core.resilience import CircuitBreaker, retry_with_backoff
+from ucenik.rag import trace
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,7 @@ async def complete(
                 "error": str(exc),
             },
         )
+        trace.record("llm_call", messages=messages, model=resolved_model, error=str(exc))
         raise LLMProxyError("failed to reach the LLM proxy") from exc
 
     logger.info(
@@ -137,6 +139,19 @@ async def complete(
             "completion_tokens": result.completion_tokens,
             "total_tokens": result.total_tokens,
         },
+    )
+    # Full prompt + response - only kept when a RAG trace is active (rag/trace.py).
+    trace.record(
+        "llm_call",
+        messages=messages,
+        model=result.model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        response=result.content,
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        total_tokens=result.total_tokens,
+        duration_ms=round((time.perf_counter() - start) * 1000, 2),
     )
     return result
 
@@ -219,6 +234,11 @@ async def stream_complete(
         payload["frequency_penalty"] = frequency_penalty
 
     result = StreamedCompletion(resolved_model)
+    # The answer itself is recorded by the caller once the stream ends
+    # (services/chat.py) - this side only knows the prompt.
+    trace.record(
+        "llm_call_stream", messages=messages, model=resolved_model, temperature=temperature, max_tokens=max_tokens
+    )
 
     async def _generate() -> AsyncGenerator[str]:
         if _circuit_breaker.is_open:

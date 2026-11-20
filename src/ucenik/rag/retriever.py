@@ -31,12 +31,13 @@ repeated. Search itself is unchanged - only what's returned for each hit.
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from rank_bm25 import BM25Okapi
 
 from ucenik.cache.chat_cache import get_content_version
 from ucenik.core.config import settings
+from ucenik.rag import trace
 from ucenik.rag.embedder import embed_query
 from ucenik.rag.vector_store import get_all_chunks, query_similar
 
@@ -81,9 +82,13 @@ async def _get_corpus_and_bm25(subject_id: str) -> tuple[list[dict], BM25Okapi, 
     version = await get_content_version(subject_id)
     cached = _bm25_cache.get(subject_id)
     if cached is not None and cached[0] == version:
+        trace.record(
+            "corpus", subject_id=subject_id, chunk_count=len(cached[1]), bm25_cache="hit", content_version=version
+        )
         return cached[1], cached[2], cached[3]
 
     corpus = await get_all_chunks(subject_id)
+    trace.record("corpus", subject_id=subject_id, chunk_count=len(corpus), bm25_cache="miss", content_version=version)
     if not corpus:
         _bm25_cache.pop(subject_id, None)
         return None
@@ -111,16 +116,35 @@ async def retrieve(subject_id: str, query: str, k: int = 5) -> list[RetrievedChu
 
     # Sparse side: BM25 over every chunk's raw text - see _get_corpus_and_bm25
     # for the caching that now avoids rebuilding this on every single query.
-    sparse_scores = bm25.get_scores(_tokenize(query))
-    sparse_ranked_ids = [
-        chunk_id
-        for chunk_id, _ in sorted(zip((c["id"] for c in corpus), sparse_scores, strict=True), key=lambda pair: -pair[1])
-    ][:_CANDIDATE_POOL_SIZE]
+    query_tokens = _tokenize(query)
+    sparse_scores = bm25.get_scores(query_tokens)
+    sparse_ranked = sorted(zip((c["id"] for c in corpus), sparse_scores, strict=True), key=lambda pair: -pair[1])
+    sparse_ranked_ids = [chunk_id for chunk_id, _ in sparse_ranked][:_CANDIDATE_POOL_SIZE]
+    if trace.active():
+        trace.record(
+            "bm25",
+            query=query,
+            query_tokens=query_tokens,
+            idf={t: float(bm25.idf[t]) if t in bm25.idf else None for t in query_tokens},
+            top=[
+                {"id": cid, "score": float(score), "preview": _trace_preview(corpus_by_id[cid])}
+                for cid, score in sparse_ranked[:_CANDIDATE_POOL_SIZE]
+            ],
+        )
 
     # Dense side: cosine similarity via Chroma's index.
     query_vector = await embed_query(query)
     dense_result = await query_similar(subject_id, query_vector, n_results=min(_CANDIDATE_POOL_SIZE, len(corpus)))
     dense_ranked_ids = dense_result["ids"][0] if dense_result["ids"] else []
+    if trace.active():
+        distances = (dense_result.get("distances") or [[]])[0] or [None] * len(dense_ranked_ids)
+        trace.record(
+            "dense",
+            top=[
+                {"id": cid, "distance": dist, "preview": _trace_preview(corpus_by_id.get(cid))}
+                for cid, dist in zip(dense_ranked_ids, distances, strict=False)
+            ],
+        )
 
     # Reciprocal rank fusion: score each id by 1/(rank + K) per list it
     # appears in, summed across lists. A chunk both searches agree on scores
@@ -131,8 +155,37 @@ async def retrieve(subject_id: str, query: str, k: int = 5) -> list[RetrievedChu
             fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + 1.0 / (rank + _RRF_K)
 
     top_ids = sorted(fused_scores, key=lambda chunk_id: -fused_scores[chunk_id])[:k]
+    if trace.active():
+        _trace_rrf(fused_scores, dense_ranked_ids, sparse_ranked_ids, top_ids, k)
     hits = [corpus_by_id[chunk_id] for chunk_id in top_ids if chunk_id in corpus_by_id]
     return _expand_with_neighbors(hits, positions, settings.retrieval_neighbor_window)
+
+
+def _trace_preview(chunk: dict | None) -> str:
+    # Stored text starts with the breadcrumb line - show it, it's what BM25 scored too.
+    return " ".join(chunk["text"].split())[:140] if chunk else "?"
+
+
+def _trace_rrf(
+    fused_scores: dict[str, float], dense_ids: list[str], sparse_ids: list[str], top_ids: list[str], k: int
+) -> None:
+    dense_rank = {cid: r for r, cid in enumerate(dense_ids)}
+    sparse_rank = {cid: r for r, cid in enumerate(sparse_ids)}
+    rows = []
+    for cid in sorted(fused_scores, key=lambda c: -fused_scores[c]):
+        d, b = dense_rank.get(cid), sparse_rank.get(cid)
+        rows.append(
+            {
+                "id": cid,
+                "score": fused_scores[cid],
+                "dense_rank": d,
+                "dense_contrib": 0.0 if d is None else 1.0 / (d + _RRF_K),
+                "bm25_rank": b,
+                "bm25_contrib": 0.0 if b is None else 1.0 / (b + _RRF_K),
+                "selected": cid in top_ids,
+            }
+        )
+    trace.record("rrf", rrf_k=_RRF_K, top_k=k, rows=rows)
 
 
 def _position(chunk: dict) -> tuple[str, int] | None:
@@ -150,6 +203,7 @@ def _position(chunk: dict) -> tuple[str, int] | None:
 class _Passage:
     hit: dict  # the best-ranked search hit this passage was built around
     indices: set[int] | None  # chunk_index values to stitch; None = legacy, use hit text as-is
+    merged_hit_ids: list[str] = field(default_factory=list)  # lower-ranked hits folded into this one
 
 
 def _expand_with_neighbors(hits: list[dict], positions: _Positions, window: int) -> list[RetrievedChunk]:
@@ -183,13 +237,14 @@ def _expand_with_neighbors(hits: list[dict], positions: _Positions, window: int)
                     and first.indices & second.indices
                 ):
                     first.indices |= second.indices
+                    first.merged_hit_ids += [second.hit["id"], *second.merged_hit_ids]
                     del passages[b]
                     merged = True
                     break
             if merged:
                 break
 
-    return [
+    result = [
         RetrievedChunk(
             id=p.hit["id"],
             text=_passage_text(p, positions),
@@ -198,6 +253,21 @@ def _expand_with_neighbors(hits: list[dict], positions: _Positions, window: int)
         )
         for p in passages
     ]
+    trace.record(
+        "expansion",
+        window=window,
+        passages=[
+            {
+                "hit_id": p.hit["id"],
+                "source_filename": r.source_filename,
+                "chunk_indices": sorted(p.indices) if p.indices is not None else None,
+                "merged_hit_ids": p.merged_hit_ids,
+                "text": r.text,
+            }
+            for p, r in zip(passages, result, strict=True)
+        ],
+    )
+    return result
 
 
 def _passage_text(passage: _Passage, positions: _Positions) -> str:

@@ -14,3 +14,6 @@ wheels/
 
 # Design docs (internal)
 docs/
+
+# RAG trace files (rag/trace.py) - contain document text and questions
+rag_traces/
