@@ -11,15 +11,28 @@ _extract_pdf_text), Word (.docx), PowerPoint (.pptx), Excel (.xlsx) - modern
 Office Open XML formats only, not the legacy binary .doc/.ppt/.xls formats
 (those need much heavier tooling, e.g. a LibreOffice conversion step -
 deliberately out of scope for now).
+
+Structure, not just text: extract_sections() returns the document as a list
+of Sections - each one a heading path ("Chapter 3 > The Calvin cycle") plus
+the text under it - using whatever structure each format already exposes
+through the libraries already in use here: PDF bookmarks (outline), Word
+heading styles, PowerPoint slide titles, Excel sheet names. Chunking then
+happens per section, and every chunk carries its heading path as free,
+deterministic context (rag/chunker.py, rag/ingest.py) - previously this
+structure was thrown away at this step, leaving only an LLM-generated blurb
+to reconstruct "what is this chunk about" after the fact.
 """
 
 import asyncio
 import io
 import logging
+from dataclasses import dataclass, field
 
 import openpyxl
 import pytesseract
 from docx import Document as DocxDocument
+from docx.table import Table as DocxTable
+from docx.text.paragraph import Paragraph as DocxParagraph
 from pdf2image import convert_from_bytes
 from pptx import Presentation
 from pypdf import PdfReader
@@ -58,23 +71,62 @@ _PPTX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentation
 _XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-async def extract_text(content_type: str, data: bytes) -> str:
+@dataclass
+class Section:
+    """A run of document text under one heading path. `heading_path` is
+    outermost-first (["Chapter 3", "The Calvin cycle"]), and empty for text
+    with no known heading (a plain-text file, a PDF without bookmarks, Word
+    content before its first heading).
+    """
+
+    heading_path: list[str] = field(default_factory=list)
+    text: str = ""
+
+
+async def extract_sections(content_type: str, data: bytes) -> list[Section]:
+    """The document as an ordered list of non-empty Sections. Raises
+    UnsupportedDocumentError when there's no text at all."""
     if content_type == "text/plain":
-        return _require_nonempty(data.decode("utf-8", errors="replace"))
+        return [Section(text=_require_nonempty(data.decode("utf-8", errors="replace")))]
 
     if content_type == "application/pdf":
-        return await _extract_pdf_text(data)
+        return await _extract_pdf_sections(data)
 
     if content_type == _DOCX_CONTENT_TYPE:
-        return _extract_docx_text(data)
+        return _extract_docx_sections(data)
 
     if content_type == _PPTX_CONTENT_TYPE:
-        return _extract_pptx_text(data)
+        return _extract_pptx_sections(data)
 
     if content_type == _XLSX_CONTENT_TYPE:
-        return _extract_xlsx_text(data)
+        return _extract_xlsx_sections(data)
 
     raise UnsupportedDocumentError(f"unsupported content type: {content_type}")
+
+
+def render_sections(sections: list[Section]) -> str:
+    """Flat-text view of a document, with each headed section introduced by
+    its heading path in brackets - keeps the structure visible to an LLM
+    reading the whole document (rag/contextualizer.py) instead of flattening
+    it away. Sections with no heading path render as their bare text.
+    """
+    return "\n\n".join(f"[{' > '.join(s.heading_path)}]\n{s.text}" if s.heading_path else s.text for s in sections)
+
+
+async def extract_text(content_type: str, data: bytes) -> str:
+    """Whole document as one string - see render_sections."""
+    return render_sections(await extract_sections(content_type, data))
+
+
+def _append(sections: list[Section], heading_path: list[str], text: str) -> None:
+    """Add `text` under `heading_path`, merging into the previous section when
+    the path hasn't changed (consecutive PDF pages in the same chapter)."""
+    if not text.strip():
+        return
+    if sections and sections[-1].heading_path == heading_path:
+        sections[-1].text += "\n\n" + text
+    else:
+        sections.append(Section(heading_path=list(heading_path), text=text))
 
 
 def _require_nonempty(text: str) -> str:
@@ -83,7 +135,7 @@ def _require_nonempty(text: str) -> str:
     return text
 
 
-async def _extract_pdf_text(data: bytes) -> str:
+async def _extract_pdf_sections(data: bytes) -> list[Section]:
     """Per-page, not per-document: a page either has a native text layer, or
     it doesn't, and that's decided independently for each page - a mixed
     document (some real text pages, some scanned/image pages) is common
@@ -169,15 +221,74 @@ async def _extract_pdf_text(data: bytes) -> str:
                     extra={"event": "extractor.page_has_no_content", "page": i + 1},
                 )
 
-    text = "\n\n".join(p for p in page_texts if p.strip())
-    if not text.strip():
+    if not any(p.strip() for p in page_texts):
         if tesseract_missing:
             raise UnsupportedDocumentError("OCR unavailable - the Tesseract binary isn't installed on this host")
         raise UnsupportedDocumentError(
             "no extractable text found on any page, even after OCR - the file may be blank, "
             "corrupt, or too low-quality to read"
         )
-    return text
+
+    sections: list[Section] = []
+    for text, heading_path in zip(page_texts, _pdf_page_heading_paths(reader, len(page_texts)), strict=True):
+        _append(sections, heading_path, text)
+    return sections
+
+
+def _pdf_outline_starts(reader: PdfReader) -> list[tuple[int, list[str]]]:
+    """(0-indexed start page, heading path) for every bookmark in the PDF's
+    outline, sorted by page. pypdf represents nesting as a list following
+    its parent entry: [A, [A.1, A.2], B] means A.1 and A.2 are children of A.
+
+    A missing or malformed outline is normal (most PDFs exported without
+    bookmarks have none) and just means no headings - never fatal.
+    """
+    starts: list[tuple[int, list[str]]] = []
+
+    def walk(items, parents: list[str]) -> None:
+        last_path: list[str] | None = None
+        for item in items:
+            if isinstance(item, list):
+                walk(item, last_path if last_path is not None else parents)
+                continue
+            title = " ".join((getattr(item, "title", None) or "").split())
+            if not title:
+                continue
+            last_path = [*parents, title]
+            try:
+                page = reader.get_destination_page_number(item)
+            except Exception:
+                continue
+            if page is not None and page >= 0:
+                starts.append((page, last_path))
+
+    try:
+        walk(reader.outline, [])
+    except Exception:
+        logger.warning("extractor.pdf_outline_unreadable", extra={"event": "extractor.pdf_outline_unreadable"})
+        return []
+    # Stable sort: several bookmarks starting on the same page keep their
+    # document order, so the last one listed wins for that page below.
+    return sorted(starts, key=lambda start: start[0])
+
+
+def _pdf_page_heading_paths(reader: PdfReader, page_count: int) -> list[list[str]]:
+    """Heading path for each page: the last bookmark starting on or before
+    it. Page-granular, since bookmarks point at pages rather than positions
+    within one - exact when sections start on a new page (typical for
+    chapters), approximate when a subsection starts mid-page (the whole page
+    is labeled with it).
+    """
+    starts = _pdf_outline_starts(reader)
+    paths: list[list[str]] = []
+    current: list[str] = []
+    next_start = 0
+    for page in range(page_count):
+        while next_start < len(starts) and starts[next_start][0] <= page:
+            current = starts[next_start][1]
+            next_start += 1
+        paths.append(current)
+    return paths
 
 
 def _ocr_page_sync(data: bytes, page_number: int) -> str:
@@ -196,32 +307,90 @@ def _ocr_page_sync(data: bytes, page_number: int) -> str:
     return pytesseract.image_to_string(images[0])
 
 
-def _extract_docx_text(data: bytes) -> str:
+def _require_sections(sections: list[Section]) -> list[Section]:
+    if not sections:
+        raise UnsupportedDocumentError("no extractable text found")
+    return sections
+
+
+def _docx_heading_level(paragraph: DocxParagraph) -> int | None:
+    """0 for the "Title" style, N for "Heading N", None for anything else.
+    Built-in style names come back in English from python-docx even for a
+    document authored in a localized Word, so this matching is safe there.
+    """
+    try:
+        name = (paragraph.style.name or "").strip().lower() if paragraph.style is not None else ""
+    except Exception:
+        return None
+    if name == "title":
+        return 0
+    if name.startswith("heading"):
+        level = name.removeprefix("heading").strip()
+        return int(level) if level.isdigit() else 1
+    return None
+
+
+def _extract_docx_sections(data: bytes) -> list[Section]:
+    """Body content in document order (paragraphs and tables interleaved -
+    a table stays under the heading it actually appears beneath), split
+    into a new section at every heading. The heading stack handles nesting:
+    a Heading 2 replaces any previous Heading 2+ and sits under the current
+    Heading 1.
+    """
     doc = DocxDocument(io.BytesIO(data))
-    parts = [p.text for p in doc.paragraphs if p.text.strip()]
-    for table in doc.tables:
-        for row in table.rows:
-            row_text = " | ".join(cell.text.strip() for cell in row.cells)
-            if row_text.strip(" |"):
-                parts.append(row_text)
-    return _require_nonempty("\n\n".join(parts))
+    sections: list[Section] = []
+    heading_stack: list[tuple[int, str]] = []
+    parts: list[str] = []
+
+    def flush() -> None:
+        _append(sections, [title for _, title in heading_stack], "\n\n".join(parts))
+        parts.clear()
+
+    for block in doc.iter_inner_content():
+        if isinstance(block, DocxTable):
+            for row in block.rows:
+                row_text = " | ".join(cell.text.strip() for cell in row.cells)
+                if row_text.strip(" |"):
+                    parts.append(row_text)
+            continue
+
+        text = block.text
+        if not text.strip():
+            continue
+        level = _docx_heading_level(block)
+        if level is not None:
+            flush()
+            while heading_stack and heading_stack[-1][0] >= level:
+                heading_stack.pop()
+            heading_stack.append((level, " ".join(text.split())))
+        parts.append(text)
+
+    flush()
+    return _require_sections(sections)
 
 
-def _extract_pptx_text(data: bytes) -> str:
+def _extract_pptx_sections(data: bytes) -> list[Section]:
+    """One section per slide, headed "Slide N: <title>" (or just "Slide N"
+    for a slide with no title placeholder)."""
     presentation = Presentation(io.BytesIO(data))
-    slides_text = []
+    sections: list[Section] = []
     for i, slide in enumerate(presentation.slides, start=1):
         shape_texts = [
             shape.text_frame.text for shape in slide.shapes if shape.has_text_frame and shape.text_frame.text.strip()
         ]
-        if shape_texts:
-            slides_text.append(f"[Slide {i}]\n" + "\n".join(shape_texts))
-    return _require_nonempty("\n\n".join(slides_text))
+        if not shape_texts:
+            continue
+        title_shape = slide.shapes.title
+        title = " ".join(title_shape.text_frame.text.split()) if title_shape is not None else ""
+        heading = f"Slide {i}: {title}" if title else f"Slide {i}"
+        sections.append(Section(heading_path=[heading], text="\n".join(shape_texts)))
+    return _require_sections(sections)
 
 
-def _extract_xlsx_text(data: bytes) -> str:
+def _extract_xlsx_sections(data: bytes) -> list[Section]:
+    """One section per sheet, headed by the sheet's name."""
     workbook = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
-    sheets_text = []
+    sections: list[Section] = []
     for sheet in workbook.worksheets:
         rows_text = []
         for row in sheet.iter_rows(values_only=True):
@@ -229,5 +398,5 @@ def _extract_xlsx_text(data: bytes) -> str:
             if cells:
                 rows_text.append(" | ".join(cells))
         if rows_text:
-            sheets_text.append(f"[Sheet: {sheet.title}]\n" + "\n".join(rows_text))
-    return _require_nonempty("\n\n".join(sheets_text))
+            sections.append(Section(heading_path=[sheet.title], text="\n".join(rows_text)))
+    return _require_sections(sections)
