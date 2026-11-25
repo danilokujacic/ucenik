@@ -1,0 +1,175 @@
+# =============================================================================
+#  CI / Deploy — orchestrator for a Turbo (or Nx) monorepo with N frontend apps
+# =============================================================================
+#
+#  EXAMPLE ONLY — this lives under examples/, so GitHub will not run it.
+#  In a real monorepo it goes in .github/workflows/ci.yml.
+#
+#  Assumed repo layout:
+#    apps/web, apps/admin, apps/docs, ...   <- deployable apps (6 of them)
+#    packages/ui, packages/config, ...      <- shared packages (never deployed)
+#    docker/next.Dockerfile                 <- ONE Dockerfile for every app
+#
+#  Flow:
+#    plan    -> which apps are affected since the last green run?
+#    verify  -> lint / typecheck / test everything affected (apps + packages)
+#    deploy  -> matrix: one parallel job per affected app (_deploy-app.yml)
+#    ci-ok   -> the single required status check for branch protection
+# =============================================================================
+
+name: CI / Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      apps:
+        description: 'Force-deploy these apps, JSON array e.g. ["web","admin"]. Empty = affected only.'
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read # nx-set-shas reads previous workflow runs to find the last green one
+
+# PRs: a new push cancels the old run.
+# main: runs queue instead of cancelling. If GitHub drops a queued run, nothing
+# is lost, because the next run diffs against the last *green* SHA anyway.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. PLAN — ask the monorepo tool which apps need to be deployed
+  # ---------------------------------------------------------------------------
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      apps: ${{ steps.pick.outputs.apps }} # e.g. ["web","admin"] or []
+      base: ${{ steps.shas.outputs.base }} # SHA we diff against
+    steps:
+      - name: Checkout (full history — affected detection needs it)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Finds the SHA of the last *successful* run of this workflow on main.
+      # Despite the name it is tool-agnostic; works fine with Turbo.
+      - name: Find base SHA (last green run)
+        id: shas
+        uses: nrwl/nx-set-shas@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4 # version comes from "packageManager" in package.json
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Compute affected apps
+        id: pick
+        env:
+          FORCED: ${{ inputs.apps }}
+          BASE: ${{ steps.shas.outputs.base }}
+        run: |
+          if [ -n "$FORCED" ]; then
+            # Manual run: deploy exactly what was asked for
+            apps="$FORCED"
+          else
+            # "...[BASE]" = packages changed since BASE + everything that depends on them.
+            # So a change in packages/ui pulls in every app that imports it.
+            # Then keep only things under apps/ (shared packages aren't deployed).
+            apps=$(pnpm -s turbo ls --filter="...[$BASE]" --output=json \
+              | jq -c '[.packages.items[] | select(.path | startswith("apps/")) | .name]')
+
+            # --- Nx equivalent (replace the line above) ---
+            # apps=$(pnpm -s nx show projects --affected --base="$BASE" --head=HEAD --type=app --json)
+          fi
+
+          echo "apps=$apps" >> "$GITHUB_OUTPUT"
+          echo "### Apps to deploy: \`$apps\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # 2. VERIFY — quality gates, run ONCE for everything affected
+  # ---------------------------------------------------------------------------
+  verify:
+    needs: plan
+    runs-on: ubuntu-24.04
+    env:
+      # Remote cache: tasks whose inputs haven't changed are replayed, not re-run.
+      # (Nx: use NX_CLOUD_ACCESS_TOKEN instead.)
+      TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+      TURBO_TEAM: ${{ vars.TURBO_TEAM }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit dependencies
+        run: pnpm audit --prod --audit-level=high
+
+      # Includes shared packages: a failing test in packages/ui blocks
+      # every app that depends on it from deploying.
+      # Add "build" here if you want all-or-nothing deploys: then a shared-package
+      # change that breaks app C's build also stops A and B from deploying.
+      # Without it, A and B deploy and only C fails (independent deploys).
+      - name: Lint, typecheck, test (affected only)
+        run: pnpm turbo run lint typecheck test --filter="...[${{ needs.plan.outputs.base }}]"
+        # Nx: pnpm nx affected -t lint typecheck test --base=${{ needs.plan.outputs.base }}
+
+  # ---------------------------------------------------------------------------
+  # 3. DEPLOY — one parallel job per affected app, all using the same template
+  # ---------------------------------------------------------------------------
+  deploy:
+    needs: [plan, verify]
+    # Never deploy from PRs, and skip entirely if nothing is affected
+    if: github.event_name != 'pull_request' && needs.plan.outputs.apps != '[]'
+    permissions:
+      contents: read
+      packages: write # push images to GHCR
+    strategy:
+      fail-fast: false # one broken app must NOT cancel the other five
+      # max-parallel: 3   # optional: limit blast radius when a shared change hits all apps
+      matrix:
+        app: ${{ fromJSON(needs.plan.outputs.apps) }}
+    uses: ./.github/workflows/_deploy-app.yml
+    with:
+      app: ${{ matrix.app }}
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # 4. CI-OK — the ONLY job marked "required" in branch protection
+  # ---------------------------------------------------------------------------
+  # Matrix jobs have dynamic names (deploy (web), deploy (admin)...) and may not
+  # run at all, so you can't mark them required. This job always runs and fails
+  # if anything upstream failed or was cancelled.
+  ci-ok:
+    if: always()
+    needs: [plan, verify, deploy]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check all upstream jobs
+        run: |
+          echo '${{ toJSON(needs.*.result) }}' \
+            | jq -e 'all(. == "success" or . == "skipped")'

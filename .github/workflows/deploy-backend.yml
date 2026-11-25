@@ -1,0 +1,120 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "docker-compose*.yaml"
+      - ".github/workflows/deploy-backend.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Audit dependencies for known vulnerabilities
+        run: |
+          uv export --frozen --no-dev --no-emit-project -o requirements-audit.txt
+          uvx pip-audit -r requirements-audit.txt --disable-pip --no-deps
+
+      - name: Run tests
+        run: uv run pytest -q
+        env:
+          # Required by Settings() at import time. The URLs are placeholders -
+          # tests/conftest.py overrides them with the testcontainers' real ones.
+          JWT_SECRET: ci-test-secret-not-for-production-use
+          MAX_QUOTA: "200000"
+          MONGODB_URL: mongodb://placeholder:27017
+          REDIS_URL: redis://placeholder:6379
+
+  backend-build:
+    needs: backend-test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compute image name
+        id: image
+        # GHCR requires lowercase; ${VAR,,} is bash for "lowercase this".
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (not pushed yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
+            ${{ steps.image.outputs.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.image.outputs.name }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        run: |
+          docker push ${{ steps.image.outputs.name }}:${{ github.sha }}
+          docker push ${{ steps.image.outputs.name }}:latest
+
+  backend-deploy:
+    needs: backend-build
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: backend-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -e
+            cd "${{ secrets.DEPLOY_PATH }}"
+            COMPOSE="docker compose -f docker-compose.yaml -f docker-compose.prod.yaml"
+            $COMPOSE pull app worker llm-proxy embedding-service
+            $COMPOSE up -d
+            docker image prune -f

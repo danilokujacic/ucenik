@@ -1,0 +1,140 @@
+# =============================================================================
+#  Deploy one app — reusable template called by ci.yml (once per app)
+# =============================================================================
+#
+#  EXAMPLE ONLY — this lives under examples/, so GitHub will not run it.
+#
+#  Every app goes through the exact same steps. What differs per app is
+#  configuration, and that lives in a GitHub Environment named after the app
+#  (Settings -> Environments -> "web", "admin", ...). Each Environment uses
+#  the SAME variable names, so this file never needs per-app if/else.
+#
+#  Per-app Environment contents:
+#    vars:    NEXT_PUBLIC_API_URL, NEXT_PUBLIC_WS_URL, HEALTH_URL
+#    secrets: SSH_HOST, SSH_USER, SSH_PRIVATE_KEY, SSH_PORT, DEPLOY_PATH
+#  You can also add protection rules per app (e.g. required reviewer for "admin").
+#
+#  Adding app #7 = create apps/<name> + an Environment "<name>". No YAML edits.
+# =============================================================================
+
+name: Deploy one app
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: "App name as known to turbo/nx (e.g. web)"
+        type: string
+        required: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # BUILD — build image, scan it, push it tagged with the commit SHA
+  # ---------------------------------------------------------------------------
+  build:
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.app }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # If the Environment doesn't exist, GitHub silently creates an EMPTY one,
+      # and you'd ship a bundle with NEXT_PUBLIC_API_URL="". Fail loudly instead.
+      - name: Assert required config exists
+        env:
+          API_URL: ${{ vars.NEXT_PUBLIC_API_URL }}
+          WS_URL: ${{ vars.NEXT_PUBLIC_WS_URL }}
+          HEALTH_URL: ${{ vars.HEALTH_URL }}
+        run: |
+          missing=""
+          [ -z "$API_URL" ]    && missing="$missing NEXT_PUBLIC_API_URL"
+          [ -z "$WS_URL" ]     && missing="$missing NEXT_PUBLIC_WS_URL"
+          [ -z "$HEALTH_URL" ] && missing="$missing HEALTH_URL"
+          if [ -n "$missing" ]; then
+            echo "::error::Environment '${{ inputs.app }}' is missing vars:$missing"
+            exit 1
+          fi
+
+      - name: Compute image name
+        id: image
+        # ghcr.io/<owner>/<repo>-<app>, lowercased (GHCR requirement)
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}-${{ inputs.app }}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (not pushed yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: . # repo root — the Dockerfile prunes down to this app
+          file: docker/next.Dockerfile
+          load: true
+          push: false
+          build-args: |
+            APP=${{ inputs.app }}
+            NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+            NEXT_PUBLIC_WS_URL=${{ vars.NEXT_PUBLIC_WS_URL }}
+          # SHA tag only. ":latest" is ambiguous once 6 apps deploy independently.
+          tags: ${{ steps.image.outputs.name }}:${{ github.sha }}
+          # Separate cache per app so apps don't evict each other's layers
+          cache-from: type=gha,scope=${{ inputs.app }}
+          cache-to: type=gha,scope=${{ inputs.app }},mode=max
+
+      - name: Scan image (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.image.outputs.name }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        run: docker push ${{ steps.image.outputs.name }}:${{ github.sha }}
+
+  # ---------------------------------------------------------------------------
+  # DEPLOY — roll out the exact image built above, then verify it's alive
+  # ---------------------------------------------------------------------------
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.app }}
+    # Per-app lock: web and admin can deploy at the same time,
+    # but two "web" deploys never overlap.
+    concurrency:
+      group: deploy-${{ inputs.app }}
+      cancel-in-progress: false
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -e
+            cd "${{ secrets.DEPLOY_PATH }}"
+            # Compose service uses: image: ghcr.io/.../repo-<app>:${IMAGE_TAG}
+            export IMAGE_TAG=${{ github.sha }}
+            COMPOSE="docker compose -f docker-compose.yaml -f docker-compose.prod.yaml"
+            $COMPOSE pull ${{ inputs.app }}
+            $COMPOSE up -d ${{ inputs.app }}   # only this app's service is touched
+            docker image prune -f
+
+      - name: Smoke test
+        run: |
+          curl -fsS --retry 10 --retry-delay 3 --retry-all-errors "${{ vars.HEALTH_URL }}"
+
+  # Rollback: Actions -> "CI / Deploy" -> Run workflow, pick an older commit
+  # (or re-run an old successful run). Images are tagged by SHA, so that exact
+  # build gets redeployed.

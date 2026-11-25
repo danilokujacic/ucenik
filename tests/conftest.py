@@ -23,6 +23,7 @@ import asyncio
 import httpx
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from testcontainers.core.container import DockerContainer
 from testcontainers.mongodb import MongoDbContainer
 from testcontainers.redis import RedisContainer
 
@@ -51,24 +52,80 @@ from ucenik.models import ALL_DOCUMENT_MODELS as ALL_MODELS  # noqa: E402
 from ucenik.models.users import User  # noqa: E402
 
 
+MINIO_USER = "minioadmin"
+MINIO_PASSWORD = "minioadmin"
+
+
+def _chroma_container() -> DockerContainer:
+    # Generic DockerContainer rather than testcontainers' own chroma module:
+    # that module's extra pulls in the `chromadb-client` package, which ships
+    # the same `chromadb` import namespace as the full `chromadb` package this
+    # project already depends on - the two would overwrite each other's files.
+    return DockerContainer("chromadb/chroma").with_exposed_ports(8000)
+
+
+def _minio_container() -> DockerContainer:
+    return (
+        DockerContainer("minio/minio")
+        .with_command("server /data")
+        .with_env("MINIO_ROOT_USER", MINIO_USER)
+        .with_env("MINIO_ROOT_PASSWORD", MINIO_PASSWORD)
+        .with_exposed_ports(9000)
+    )
+
+
+def _base_url(container: DockerContainer, port: int) -> str:
+    return f"http://{container.get_container_host_ip()}:{container.get_exposed_port(port)}"
+
+
+async def _wait_for_http(url: str, timeout: float = 60) -> None:
+    """Polls `url` until it answers 200. A container being *started* doesn't
+    mean the server inside it is *ready* - Chroma and MinIO both take a few
+    seconds to boot after Docker reports them running.
+    """
+    deadline = time.monotonic() + timeout
+    async with AsyncClient() as client:
+        while time.monotonic() < deadline:
+            try:
+                response = await client.get(url, timeout=2)
+                if response.status_code == 200:
+                    return
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(1)
+    raise RuntimeError(f"{url} did not become ready within {timeout}s")
+
+
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def _test_db():
-    """Spins up throwaway Mongo + Redis containers for this test session via
-    testcontainers, rather than assuming docker-compose.yaml's dev infra is
-    already running - the suite becomes self-contained (no manual
-    `docker compose up` step first, no risk of colliding with dev data).
+    """Spins up throwaway Mongo, Redis, Chroma and MinIO containers for this
+    test session via testcontainers, rather than assuming docker-compose.yaml's
+    dev infra is already running - the suite is fully self-contained (no
+    manual `docker compose up` step first, locally or in CI, and no risk of
+    colliding with dev data). Host ports are picked at random, so this also
+    runs fine alongside a dev stack already bound to 8000/9000/27017/6379.
     Each container is destroyed at the end of the session; nothing persists
     between runs. Same images docker-compose.yaml uses, for consistency.
-
-    Chroma/MinIO aren't containerized here (yet) - document-ingest/storage
-    tests still rely on docker-compose.yaml's chromadb/minio being up
-    separately, same as before this existed.
     """
-    with MongoDbContainer("mongo:8") as mongo, RedisContainer("redis:8") as redis_container:
+    with (
+        MongoDbContainer("mongo:8") as mongo,
+        RedisContainer("redis:8") as redis_container,
+        _chroma_container() as chroma,
+        _minio_container() as minio,
+    ):
         settings.mongodb_url = mongo.get_connection_url()
         redis_host = redis_container.get_container_host_ip()
         redis_port = redis_container.get_exposed_port(redis_container.port)
         settings.redis_url = f"redis://{redis_host}:{redis_port}"
+
+        settings.chroma_host = chroma.get_container_host_ip()
+        settings.chroma_port = int(chroma.get_exposed_port(8000))
+        await _wait_for_http(f"{_base_url(chroma, 8000)}/api/v2/heartbeat")
+
+        settings.s3_endpoint_url = _base_url(minio, 9000)
+        settings.s3_access_key = MINIO_USER
+        settings.s3_secret_key = MINIO_PASSWORD
+        await _wait_for_http(f"{settings.s3_endpoint_url}/minio/health/live")
 
         await db_module.init_db(document_models=ALL_MODELS)
         await init_storage()

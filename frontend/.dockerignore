@@ -1,0 +1,17 @@
+# Host node_modules (possibly Windows-built) must not overwrite the image's own.
+node_modules
+.next
+out
+build
+coverage
+
+# Never bake local env files into the image; NEXT_PUBLIC_* come in as build args.
+.env*
+
+.git
+.gitignore
+Dockerfile
+.dockerignore
+npm-debug.log*
+.pnpm-debug.log*
+*.md
