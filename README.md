@@ -38,8 +38,8 @@ docker compose up -d
 Brings up Mongo, Redis, Chroma, MinIO, and the Loki/Promtail/Grafana
 logging stack. This is the *only* thing `docker compose up` starts locally
 - the app itself runs directly on your host for fast reload (see below),
-not as a container; `docker-compose.prod.yaml` is a separate overlay that
-adds those for the actual deploy target, not used here.
+not as a container. To run the whole stack containerized instead, see
+[k8s/README.md](k8s/README.md) (local Kubernetes via minikube).
 
 ## 3. Install dependencies
 

@@ -32,7 +32,18 @@ async def init_storage() -> None:
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") not in ("404", "NoSuchBucket"):
                 raise
-            await s3.create_bucket(Bucket=settings.s3_bucket)
+            try:
+                await s3.create_bucket(Bucket=settings.s3_bucket)
+            except ClientError as create_exc:
+                # The api and the Celery worker both run this at startup, and
+                # in Kubernetes they start at the same moment: both see "no
+                # bucket", one creates it, the other gets this. Either way the
+                # bucket now exists, which is all this function promises.
+                if create_exc.response.get("Error", {}).get("Code") not in (
+                    "BucketAlreadyOwnedByYou",
+                    "BucketAlreadyExists",
+                ):
+                    raise
 
 
 async def upload_file(key: str, data: bytes, content_type: str = "application/octet-stream") -> None:

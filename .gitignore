@@ -18,3 +18,6 @@ docs/
 # RAG trace files (rag/trace.py) - contain document text and questions
 rag_traces/
 .early.coverage
+
+# Local Kubernetes secrets (k8s/overlays/local/secrets.env.example is the template)
+k8s/overlays/*/secrets.env

@@ -9,9 +9,9 @@
 # --host 127.0.0.1 explicitly: `fastapi run` (unlike `fastapi dev`, which
 # already defaults to 127.0.0.1) defaults to 0.0.0.0 - meant for "public
 # access, e.g. in a container" per its own --help text. Fine and necessary
-# in docker-compose.prod.yaml (reached by sibling containers over the
-# docker network, never exposed to the host - no `ports:` published
-# there), wrong here: this runs as a plain process on your actual machine,
+# in a Kubernetes pod (reached by other pods over the
+# cluster network, guarded by k8s/base/networkpolicies.yaml - nothing
+# else can connect there), wrong here: this runs as a plain process on your actual machine,
 # with LLM_PROXY_API_KEY empty by default in local dev, so 0.0.0.0 would
 # mean anyone who can reach this machine on port 4000 gets unauthenticated
 # LLM calls billed to your real Groq/HF key. Found by actually checking

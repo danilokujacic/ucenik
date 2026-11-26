@@ -1,0 +1,51 @@
+name: Kubernetes manifests
+
+# Renders every overlay and checks the result against the Kubernetes API
+# schemas, so a typo'd field or wrong indentation fails here instead of at
+# `kubectl apply` time. Doesn't need a cluster.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "k8s/**"
+      - ".github/workflows/k8s-validate.yml"
+  pull_request:
+    paths:
+      - "k8s/**"
+      - ".github/workflows/k8s-validate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  KUBECONFORM_VERSION: v0.8.0
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar xz -C /usr/local/bin kubeconform
+
+      # The overlay's secretGenerator reads secrets.env, which is gitignored.
+      # The example's placeholder values are enough to render.
+      - name: Provide placeholder secrets
+        run: |
+          for dir in k8s/overlays/*/; do
+            [ -f "${dir}secrets.env.example" ] && cp "${dir}secrets.env.example" "${dir}secrets.env"
+          done
+
+      - name: Render and validate overlays
+        # kubectl (preinstalled on GitHub's Ubuntu runners) has kustomize built in.
+        run: |
+          for dir in k8s/overlays/*/; do
+            echo "::group::${dir}"
+            kubectl kustomize "$dir" | kubeconform -strict -summary
+            echo "::endgroup::"
+          done

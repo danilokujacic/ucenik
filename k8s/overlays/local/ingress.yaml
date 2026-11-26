@@ -1,0 +1,42 @@
+# Routes by hostname, through minikube's ingress addon (ingress-nginx):
+#
+#   http://ucenik.localhost:8080      -> frontend:3000
+#   http://api.ucenik.localhost:8080  -> api:8000   (REST, SSE and the /ws/... WebSocket)
+#
+# *.localhost always resolves to 127.0.0.1, so no /etc/hosts edits. Port 8080
+# is `make k8s-forward` (kubectl port-forward to the ingress controller).
+# Separate hostnames rather than an /api path prefix because the FastAPI
+# routes have no prefix (/auth, /subjects, ...).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ucenik
+  annotations:
+    # The same three settings the old nginx/templates/app.conf.template had:
+    # uploads up to services/documents.py's 50MB MAX_FILE_SIZE (+ multipart
+    # headroom), and long timeouts so the Tutor's SSE stream and the
+    # plan-progress WebSocket aren't cut off after nginx's default 60s.
+    nginx.ingress.kubernetes.io/proxy-body-size: 55m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: ucenik.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port: { name: http }
+    - host: api.ucenik.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port: { name: http }

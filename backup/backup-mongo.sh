@@ -1,9 +1,9 @@
 #!/bin/bash
 # Nightly mongodump loop - see docs/backlog.md item 2 / docs/deployment.md.
-# Runs inside docker-compose.prod.yaml's `backup-mongo` service, the same
-# mongo:8 image as the real database - mongodump is already present, no
-# extra package install, and its entrypoint is overridden to run this
-# script instead of starting a second mongod.
+# NOT currently wired up: it ran as docker-compose.prod.yaml's `backup-mongo`
+# service, which was removed in the move to Kubernetes. The Kubernetes
+# version should be a CronJob (one dump per run, so the while/sleep loop
+# below goes away) in the mongo:8 image, which already has mongodump.
 #
 # Restore: `mongorestore --uri="$MONGODB_URL" --archive=<file> --gzip`
 set -euo pipefail

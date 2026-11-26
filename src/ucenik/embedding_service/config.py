@@ -24,8 +24,8 @@ class EmbeddingServiceSettings(BaseSettings):
     # Shared secret this service requires from callers - same pattern as
     # llm_proxy/config.py's llm_proxy_api_key (and llm/proxy_client.py's
     # matching behavior): empty disables auth entirely, fine for local dev.
-    # This service has no `ports:` in docker-compose.prod.yaml either way -
-    # never reachable from outside the docker network there.
+    # In Kubernetes, k8s/base/networkpolicies.yaml additionally limits who
+    # can reach this service to the api and worker pods.
     embedding_service_api_key: str = ""
 
 

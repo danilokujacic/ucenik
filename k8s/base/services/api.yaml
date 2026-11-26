@@ -1,0 +1,99 @@
+# The FastAPI app (src/ucenik/main.py). The only backend pod the Ingress
+# routes to. Uses the image's default CMD (Dockerfile), so no `command:` here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector:
+    app.kubernetes.io/name: api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api
+    spec:
+      # Without this, Kubernetes injects an env var per Service in the
+      # namespace (REDIS_PORT=tcp://10.96.x.x:6379, MINIO_PORT=..., ...),
+      # which can collide with real settings names. Everything here finds
+      # services by DNS name instead, so the injected vars are only a risk.
+      enableServiceLinks: false
+      securityContext:
+        # uid 1000 = `appuser` from the Dockerfile. Set as a number because
+        # the image's `USER appuser` is a name, and Kubernetes can only
+        # check runAsNonRoot against a numeric uid.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: api
+          image: ucenik-backend
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef: { name: ucenik-config }
+          env:
+            # Only the secret keys this pod actually needs, one by one -
+            # not envFrom on the whole Secret (the old shared .env gave every
+            # container every credential, including the Groq key).
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: ucenik-secrets, key: JWT_SECRET }
+            - name: MONGO_USERNAME
+              valueFrom:
+                secretKeyRef: { name: ucenik-secrets, key: MONGO_USERNAME }
+            - name: MONGO_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: ucenik-secrets, key: MONGO_PASSWORD }
+            # $(VAR) is Kubernetes' own substitution, using vars defined
+            # above in this list - so the password lives in the Secret once,
+            # not copied into a URL by hand. Keep it URL-safe (the local
+            # secrets script generates hex).
+            - name: MONGODB_URL
+              value: mongodb://$(MONGO_USERNAME):$(MONGO_PASSWORD)@mongodb:27017/?authSource=admin
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: ucenik-secrets, key: S3_ACCESS_KEY }
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: ucenik-secrets, key: S3_SECRET_KEY }
+            - name: LLM_PROXY_API_KEY
+              valueFrom:
+                secretKeyRef: { name: ucenik-secrets, key: LLM_PROXY_API_KEY }
+            - name: EMBEDDING_SERVICE_API_KEY
+              valueFrom:
+                secretKeyRef: { name: ucenik-secrets, key: EMBEDDING_SERVICE_API_KEY }
+          # Plain TCP checks on purpose: uvicorn only opens the port after
+          # main.py's lifespan has connected to Mongo/Redis/MinIO, so "port
+          # open" already means "started". An HTTP probe would also hit the
+          # per-IP rate limiter and fill the access log every few seconds.
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }

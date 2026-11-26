@@ -11,7 +11,7 @@
 # this exact flag - same reasoning, same fix. `fastapi run` defaults to
 # 0.0.0.0, EMBEDDING_SERVICE_API_KEY is empty by default in local dev, and
 # this runs as a plain process on your actual machine (not isolated inside
-# docker-compose.prod.yaml's network the way the prod deployment is).
+# a Kubernetes pod behind NetworkPolicies the way the cluster deployment is).
 set -eu
 cd "$(dirname "$0")/.."
 exec uv run fastapi run src/ucenik/embedding_service/main.py --host 127.0.0.1 --port 4001

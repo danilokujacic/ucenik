@@ -66,7 +66,7 @@ def _chroma_container() -> DockerContainer:
 
 def _minio_container() -> DockerContainer:
     return (
-        DockerContainer("minio/minio")
+        DockerContainer("pgsty/minio")
         .with_command("server /data")
         .with_env("MINIO_ROOT_USER", MINIO_USER)
         .with_env("MINIO_ROOT_PASSWORD", MINIO_PASSWORD)

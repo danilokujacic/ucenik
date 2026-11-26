@@ -1,0 +1,23 @@
+# Lets the ingress controller reach api and frontend - the only two pods that
+# take traffic from outside the namespace. Lives in the overlay because the
+# controller's namespace depends on which controller the cluster runs
+# (minikube's addon puts ingress-nginx in `ingress-nginx`).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-ingress-controller
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [api, frontend]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8000
+        - port: 3000

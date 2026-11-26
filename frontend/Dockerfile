@@ -46,7 +46,9 @@ ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0
 
-RUN addgroup -S app && adduser -S app -G app
+# Fixed uid/gid so Kubernetes can enforce runAsNonRoot against a number
+# (k8s/base/services/frontend.yaml sets runAsUser: 1001 to match).
+RUN addgroup -S -g 1001 app && adduser -S -u 1001 -G app app
 
 # Standalone output has no static assets or public/ in it: copy them in
 # alongside server.js, where it expects them.

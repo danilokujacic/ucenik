@@ -1,0 +1,75 @@
+# Base: everything that is the same in every environment. Overlays
+# (k8s/overlays/<env>/) add what differs - image tags, hostnames, the Ingress,
+# and the real Secret values.
+#
+#   kubectl kustomize k8s/overlays/local     # render, to read what gets applied
+#   kubectl apply -k k8s/overlays/local      # apply
+#
+# Not applied on its own: the base references a Secret named `ucenik-secrets`
+# that only an overlay generates.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ucenik
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: ucenik
+    # Only add it to metadata, not to selectors - selectors are immutable on
+    # Deployments/StatefulSets, so changing a label there later would force
+    # deleting and recreating them.
+    includeSelectors: false
+
+resources:
+  - namespace.yaml
+  - networkpolicies.yaml
+  - data/mongodb.yaml
+  - data/redis.yaml
+  - data/chromadb.yaml
+  - data/minio.yaml
+  - services/api.yaml
+  - services/worker.yaml
+  - services/llm-proxy.yaml
+  - services/embedding-service.yaml
+  - services/frontend.yaml
+
+# Non-secret settings, shared by every backend pod via envFrom. Same names as
+# .env.example - pydantic-settings reads them from the environment. Hostnames
+# are Kubernetes Service names (DNS inside the namespace), not localhost.
+#
+# A generator (not a plain ConfigMap file) appends a content hash to the name
+# (ucenik-config-7g9k2...) and rewrites every reference to it, so changing a
+# value here rolls the pods automatically - a plain ConfigMap edit would not
+# restart anything and pods would keep the old values.
+configMapGenerator:
+  - name: ucenik-config
+    literals:
+      - ENVIRONMENT=production
+      - MONGODB_DB_NAME=ucenik
+      - REDIS_URL=redis://redis:6379
+      - FRONTEND_URL=http://localhost:3000 # overridden per overlay
+      - MAX_QUOTA=600000
+      - LLM_PROXY_URL=http://llm-proxy:4000
+      - LLM_PROXY_MODEL=gpt-4o-mini
+      - LLM_PROXY_TIMEOUT_SECONDS=30
+      - GROQ_MODEL=llama-3.3-70b-versatile
+      - GROQ_BASE_URL=https://api.groq.com/openai/v1
+      - HF_MODEL=meta-llama/Llama-3.1-8B-Instruct
+      - HF_BASE_URL=https://router.huggingface.co/v1
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_BUCKET=documents
+      - S3_REGION=us-east-1
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - EMBEDDING_MODEL=BAAI/bge-m3
+      - EMBEDDING_MAX_TOKENS=8192
+      - CHUNK_SIZE=400
+      - CHUNK_OVERLAP=50
+      - EMBEDDING_SERVICE_URL=http://embedding-service:4001
+      - EMBEDDING_SERVICE_TIMEOUT_SECONDS=60
+
+# Placeholder names the manifests use; each overlay maps them to a real
+# registry/tag with its own `images:` block.
+images:
+  - name: ucenik-backend
+  - name: ucenik-frontend

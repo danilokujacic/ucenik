@@ -1,0 +1,59 @@
+# Kubernetes version of docker-compose.prod.yaml's old `edge`/`internal`
+# network split: by default nothing in this namespace accepts connections,
+# then each policy below opens one specific path.
+#
+#   ingress controller -> api, frontend       (overlay: networkpolicy-ingress.yaml)
+#   api, worker        -> mongodb, redis, chromadb, minio
+#   api, worker        -> llm-proxy, embedding-service
+#
+# Only enforced if the cluster's network plugin (CNI) supports NetworkPolicy -
+# the local cluster is started with Calico for exactly that (see Makefile
+# `k8s-up`). On a CNI without support these objects are silently ignored.
+#
+# Only incoming traffic is restricted. Outgoing is left open: llm-proxy needs
+# the internet (Groq/HF) and every pod needs DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {} # every pod in the namespace
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: data-stores-from-backend
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [mongodb, redis, chromadb, minio]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [api, worker]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: internal-services-from-backend
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [llm-proxy, embedding-service]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [api, worker]

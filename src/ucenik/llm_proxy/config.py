@@ -6,7 +6,7 @@ class ProxySettings(BaseSettings):
     Settings - this service is a standalone process (own container, own
     port) with its own concerns (the real Groq credentials) that the main
     app must never see. Reads the same .env file the main app does (both
-    get the same env_file in docker-compose.prod.yaml), so shared values
+    read the same .env locally; in Kubernetes each pod gets its own env), so shared values
     (LLM_PROXY_API_KEY) stay in sync without duplicating them.
     """
 

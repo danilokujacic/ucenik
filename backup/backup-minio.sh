@@ -1,7 +1,8 @@
 #!/bin/sh
 # Nightly MinIO object mirror loop - see docs/backlog.md item 2 /
-# docs/deployment.md. Runs inside docker-compose.prod.yaml's
-# `backup-minio` service (minio/mc image).
+# docs/deployment.md. NOT currently wired up: it ran as
+# docker-compose.prod.yaml's `backup-minio` service (minio/mc image), which
+# was removed in the move to Kubernetes - see backup-mongo.sh's header.
 #
 # Deliberately simple, not incremental: each run mirrors the bucket's
 # *current* full state into a fresh timestamped directory (`mc mirror`

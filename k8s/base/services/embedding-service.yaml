@@ -1,0 +1,76 @@
+# Embedding service (src/ucenik/embedding_service/): loads BGE-M3 once for
+# api and worker. The heaviest pod by far (~2.3GB just for the model, CPU-only).
+apiVersion: v1
+kind: Service
+metadata:
+  name: embedding-service
+spec:
+  selector:
+    app.kubernetes.io/name: embedding-service
+  ports:
+    - name: http
+      port: 4001
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embedding-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: embedding-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: embedding-service
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: embedding-service
+          image: ucenik-backend
+          command: ["uv", "run", "fastapi", "run", "src/ucenik/embedding_service/main.py", "--host", "0.0.0.0", "--port", "4001"]
+          ports:
+            - name: http
+              containerPort: 4001
+          envFrom:
+            - configMapRef: { name: ucenik-config }
+          env:
+            - name: EMBEDDING_SERVICE_API_KEY
+              valueFrom:
+                secretKeyRef: { name: ucenik-secrets, key: EMBEDDING_SERVICE_API_KEY }
+          # Loading the model takes a while. startupProbe gives it up to
+          # 60 x 5s = 5 minutes; liveness/readiness only start once it passes,
+          # so a slow model load is never mistaken for a hung process.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            # A long embedding batch can keep this single process busy -
+            # allow a few slow answers before restarting it.
+            timeoutSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests: { cpu: 500m, memory: 2560Mi }
+            limits: { cpu: "2", memory: 3Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }

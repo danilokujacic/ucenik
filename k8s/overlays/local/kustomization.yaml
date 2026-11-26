@@ -1,0 +1,41 @@
+# Local overlay: runs the whole stack on minikube (see the k8s-* targets in
+# the Makefile and k8s/README.md).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Must be repeated here even though base sets it: base's `namespace:` only
+# applies to base's own resources. Without this, the Secret generated below
+# lands in `default`, and kustomize won't link the pods in `ucenik` to it -
+# they'd reference a plain `ucenik-secrets` that doesn't exist.
+namespace: ucenik
+
+resources:
+  - ../../base
+  - ingress.yaml
+  - networkpolicy-ingress.yaml
+
+# Images built straight into minikube's Docker daemon by `make k8s-build`,
+# so nothing is pulled from a registry. A tag other than `latest` makes
+# Kubernetes default to imagePullPolicy: IfNotPresent (use the local image).
+images:
+  - name: ucenik-backend
+    newName: ucenik-backend
+    newTag: local
+  - name: ucenik-frontend
+    newName: ucenik-frontend
+    newTag: local
+
+configMapGenerator:
+  - name: ucenik-config
+    behavior: merge # change only these keys, keep the rest from base
+    literals:
+      - ENVIRONMENT=development # enables /docs on the API
+      - FRONTEND_URL=http://ucenik.localhost:8080
+
+# Reads k8s/overlays/local/secrets.env (gitignored, created by
+# `make k8s-secrets` from secrets.env.example). Like the ConfigMap, the name
+# gets a content hash, so changing a secret rolls the pods that use it.
+secretGenerator:
+  - name: ucenik-secrets
+    envs:
+      - secrets.env

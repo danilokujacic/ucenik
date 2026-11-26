@@ -4,8 +4,8 @@ an embedding load its own independent copy into memory.
 
 Why this exists: rag/embedder.py used to load `SentenceTransformer(BAAI/
 bge-m3)` directly, in-process. That's fine for a single process, but `app`
-and the Celery `worker` are separate OS processes (docker-compose.prod.yaml
-- own container, own command, same image), each with its own Python
+and the Celery `worker` are separate OS processes (k8s/base/services/
+- own pod, own command, same image), each with its own Python
 interpreter and its own module-level model singleton - the model (~2.3GB on
 disk, 2-4GB in RAM once loaded, CPU-only inference here - no GPU anywhere in
 this stack) got loaded TWICE, once per process, for zero benefit: two

@@ -1,0 +1,71 @@
+# LLM proxy (src/ucenik/llm_proxy/): the only pod holding the Groq/HF keys,
+# and the only one that needs to reach the internet. Reachable only from api
+# and worker (networkpolicies.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-proxy
+spec:
+  selector:
+    app.kubernetes.io/name: llm-proxy
+  ports:
+    - name: http
+      port: 4000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llm-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llm-proxy
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: llm-proxy
+          image: ucenik-backend
+          command: ["uv", "run", "fastapi", "run", "src/ucenik/llm_proxy/main.py", "--host", "0.0.0.0", "--port", "4000"]
+          ports:
+            - name: http
+              containerPort: 4000
+          envFrom:
+            - configMapRef: { name: ucenik-config }
+          env:
+            - name: LLM_PROXY_API_KEY
+              valueFrom:
+                secretKeyRef: { name: ucenik-secrets, key: LLM_PROXY_API_KEY }
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef: { name: ucenik-secrets, key: GROQ_API_KEY }
+            - name: HF_API_KEY
+              valueFrom:
+                secretKeyRef: { name: ucenik-secrets, key: HF_API_KEY }
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }

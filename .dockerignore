@@ -9,3 +9,10 @@ __pycache__
 docs
 tests
 docker-compose*.yaml
+# Not part of the backend image: the frontend has its own image
+# (frontend/Dockerfile), and k8s/ holds deploy manifests plus the gitignored
+# local secrets.env, which must never be baked into an image layer.
+frontend
+k8s
+examples
+rag_traces

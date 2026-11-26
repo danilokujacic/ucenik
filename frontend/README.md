@@ -78,5 +78,5 @@ the server's 401/403/404 responses remain the actual enforcement.
 ## Not built this pass
 
 - Automated tests (Playwright/RTL)
-- Docker/Caddy production wiring - no `frontend` service exists yet in the
-  root `docker-compose.prod.yaml`/`Caddyfile`
+- Production deployment - the image (`Dockerfile`) and local Kubernetes
+  manifests (`../k8s/`) exist, but there's no production cluster yet

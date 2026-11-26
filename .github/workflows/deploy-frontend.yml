@@ -1,4 +1,4 @@
-name: Deploy Frontend
+name: Frontend
 
 on:
   push:
@@ -100,24 +100,8 @@ jobs:
           docker push ${{ steps.image.outputs.name }}:${{ github.sha }}
           docker push ${{ steps.image.outputs.name }}:latest
 
-  frontend-deploy:
-    needs: frontend-build
-    runs-on: ubuntu-24.04
-    concurrency:
-      group: frontend-deploy
-      cancel-in-progress: false
-    steps:
-      - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT }}
-          script: |
-            set -e
-            cd "${{ secrets.DEPLOY_PATH }}"
-            COMPOSE="docker compose -f docker-compose.yaml -f docker-compose.prod.yaml"
-            $COMPOSE pull frontend
-            $COMPOSE up -d frontend
-            docker image prune -f
+  # No deploy job yet: the docker-compose-over-SSH deploy was removed in the
+  # move to Kubernetes, and the only cluster so far is local (k8s/README.md).
+  # When a real cluster exists, add a job here that runs
+  #   kubectl apply -k k8s/overlays/<env>
+  # with this run's image tag (github.sha), using a KUBECONFIG secret.
