@@ -135,6 +135,31 @@ Each data store is a StatefulSet with a PersistentVolumeClaim
 `kubectl delete pod`, and `make k8s-down`. Only deleting the PVC or the
 cluster (`make k8s-delete`) loses it.
 
+## CI runs on a self-hosted runner
+
+Every workflow in `.github/workflows/` runs on `runs-on: [self-hosted, linux, x64]`,
+so a machine registered as a GitHub Actions runner has to be online or jobs
+sit in "Queued". One-time setup on that machine:
+
+1. GitHub → repo **Settings → Actions → Runners → New self-hosted runner**
+   (Linux, x64), and run the download + `./config.sh` commands it shows.
+   The default labels (`self-hosted`, `Linux`, `X64`) are what the workflows
+   ask for; label matching ignores case.
+2. Install it as a service so it survives reboots:
+   `sudo ./svc.sh install && sudo ./svc.sh start`.
+3. The runner's user needs Docker without sudo (`docker` group): image
+   builds, Trivy scans and the backend tests' testcontainers all use it.
+
+Two things differ from GitHub-hosted runners:
+
+- **The disk is not wiped between runs.** The build jobs delete their local
+  images after pushing; still run `docker system prune` now and then.
+- **The repo is public.** A PR from a fork would run a stranger's code on
+  this machine, so `k8s-validate.yml` (the only workflow with a
+  `pull_request` trigger) sends fork PRs to a GitHub-hosted VM instead. Also
+  keep **Settings → Actions → General → "Require approval for all external
+  contributors"** on.
+
 ## Not done yet
 
 - **A real cluster + deploy from CI.** CI builds and pushes images to GHCR and

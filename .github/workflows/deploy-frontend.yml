@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   frontend-check:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux, x64]
     defaults:
       run:
         working-directory: frontend
@@ -45,7 +45,7 @@ jobs:
 
   frontend-build:
     needs: frontend-check
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux, x64]
     permissions:
       contents: read
       packages: write
@@ -99,6 +99,13 @@ jobs:
         run: |
           docker push ${{ steps.image.outputs.name }}:${{ github.sha }}
           docker push ${{ steps.image.outputs.name }}:latest
+
+      # Self-hosted runners keep their disk between runs, so without this every
+      # build leaves another image behind. always() = run even if a step failed.
+      - name: Remove local images
+        if: always()
+        run: |
+          docker image rm ${{ steps.image.outputs.name }}:${{ github.sha }} ${{ steps.image.outputs.name }}:latest || true
 
   # No deploy job yet: the docker-compose-over-SSH deploy was removed in the
   # move to Kubernetes, and the only cluster so far is local (k8s/README.md).

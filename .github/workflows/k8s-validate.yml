@@ -23,15 +23,25 @@ env:
 
 jobs:
   validate:
-    runs-on: ubuntu-24.04
+    # Self-hosted, except PRs from forks: the repo is public, so a fork PR
+    # would otherwise run a stranger's code on our own machine. Those go to a
+    # throwaway GitHub-hosted VM instead.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || fromJSON('["self-hosted", "linux", "x64"]') }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Self-hosted runners don't come with kubectl and don't run as root, so
+      # install both tools per job into the runner's temp dir, not /usr/local/bin.
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
       - name: Install kubeconform
         run: |
+          mkdir -p "$RUNNER_TEMP/bin"
           curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
-            | tar xz -C /usr/local/bin kubeconform
+            | tar xz -C "$RUNNER_TEMP/bin" kubeconform
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       # The overlay's secretGenerator reads secrets.env, which is gitignored.
       # The example's placeholder values are enough to render.
@@ -42,7 +52,7 @@ jobs:
           done
 
       - name: Render and validate overlays
-        # kubectl (preinstalled on GitHub's Ubuntu runners) has kustomize built in.
+        # kubectl has kustomize built in.
         run: |
           for dir in k8s/overlays/*/; do
             echo "::group::${dir}"

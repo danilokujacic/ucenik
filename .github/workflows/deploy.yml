@@ -1,0 +1,94 @@
+name: Deployment
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+      - '[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  validate-tag:
+    name: Validate tag
+    runs-on: [self-hosted, linux, x64]
+    outputs:
+      environment: ${{ steps.resolve.outputs.environment }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Resolve environment from tag
+        id: resolve
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          NUM='(0|[1-9][0-9]*)'
+          PROD_RE="^${NUM}\.${NUM}\.${NUM}$"
+          STAGE_RE="^${NUM}\.${NUM}\.${NUM}-rc\.${NUM}$"
+
+          if [[ "$TAG" =~ $PROD_RE ]]; then
+            ENVIRONMENT=prod
+          elif [[ "$TAG" =~ $STAGE_RE ]]; then
+            ENVIRONMENT=stage
+          else
+            echo "::error::Invalid tag '$TAG'. Expected X.Y.Z (prod) or X.Y.Z-rc.N (stage)."
+            exit 1
+          fi
+
+          echo "environment=$ENVIRONMENT" >> "$GITHUB_OUTPUT"
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+
+  tag-image:
+    name: Tag image ${{ needs.validate-tag.outputs.version }}
+    needs: validate-tag
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for commit image to exist
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          WAIT_SECONDS: 1200   # 20 min
+          POLL_SECONDS: 15
+        run: |
+          IMAGE="${REGISTRY}/${GITHUB_REPOSITORY,,}"   # ghcr requires lowercase
+          SRC="${IMAGE}:${GITHUB_SHA}"                 # use ${GITHUB_SHA::7} if you tag with short SHA
+
+          echo "Waiting for ${SRC} ..."
+          deadline=$((SECONDS + WAIT_SECONDS))
+          until docker buildx imagetools inspect "$SRC" > /dev/null 2>&1; do
+            if (( SECONDS >= deadline )); then
+              echo "::error::Image ${SRC} not found after ${WAIT_SECONDS}s. Did the build for this commit fail?"
+              exit 1
+            fi
+            echo "Not there yet, retrying in ${POLL_SECONDS}s..."
+            sleep "$POLL_SECONDS"
+          done
+
+          echo "SRC=${SRC}" >> "$GITHUB_ENV"
+          echo "DST=${IMAGE}:${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Retag image (no pull)
+        run: |
+          docker buildx imagetools create --tag "$DST" "$SRC"
+          docker buildx imagetools inspect "$DST"
+
+  deploy:
+    name: Deploy to ${{ needs.validate-tag.outputs.environment }}
+    needs: [validate-tag, tag-image]
+    runs-on: [self-hosted, linux, x64]
+    environment: ${{ needs.validate-tag.outputs.environment }}
+    steps:
+      - name: Deploy
+        run: echo "Deploying ${{ needs.validate-tag.outputs.version }} to ${{ needs.validate-tag.outputs.environment }}"
